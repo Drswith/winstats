@@ -60,34 +60,38 @@ rises (RAM at 67% is already yellow here):
 
 ## Download
 
-Grab `winstats.exe` (64-bit) or `winstats-x86.exe` (32-bit) from the
+Grab `winstats.exe` (x64), `winstats-x86.exe` (x86) or `winstats-arm64.exe` (ARM64) from the
 [latest release](https://github.com/mgvs/winstats/releases/latest) and run it. No installer, no runtime, a single
 executable. The same page has `winstats-agent` for the other machines you want to watch (see Remote machines).
 
 ## Supported systems
 
-| Windows | x64 | x86 | notes |
-|---|---|---|---|
-| 11 | yes | yes | the strip is a child of the taskbar; the centred task list can run over it when many windows are open, see Limitations |
-| 10 | yes | yes | child of the taskbar; the task list is shrunk to make room |
-| 8 / 8.1 | yes | yes | same as 10, no GPU load (the counters appeared in Windows 10) |
-| 7 SP1 | yes | yes | the strip is an always-on-top window floating over the taskbar (Windows 7 cannot host a layered child); it hides itself while a full-screen Direct3D game or a presentation is in front; no GPU load, no VRAM |
+| Windows | x64 | x86 | ARM64 | notes |
+|---|---|---|---|---|
+| 11 | yes | yes | yes | the strip is a child of the taskbar; the centred task list can run over it when many windows are open, see Limitations |
+| 10 | yes | yes | yes | child of the taskbar; the task list is shrunk to make room |
+| 8 / 8.1 | yes | yes | no | same as 10, no GPU load (the counters appeared in Windows 10) |
+| 7 SP1 | yes | yes | no | the strip is an always-on-top window floating over the taskbar (Windows 7 cannot host a layered child); it hides itself while a full-screen Direct3D game or a presentation is in front; no GPU load, no VRAM |
 
 The hosting mode is picked automatically (`mode = "auto"` in the config): floating on Windows 7, embedded elsewhere.
 `mode = "floating"` forces the floating window on any version, which is also a way around the Windows 11 task-list
-overlap. ARM64 is not built, but nothing in the code is x86-specific.
+overlap.
 
-Both binaries are built with Rust 1.77, the last toolchain that still runs on Windows 7.
+The Windows binaries are built with Rust 1.77, the last toolchain that still runs on Windows 7.
 
 ## Build and run
 
 ```
-cargo build --release                                   # x64
-cargo build --release --target i686-pc-windows-msvc     # x86
-target\release\winstats.exe
+cargo build --release                                              # x64
+cargo build --release --target i686-pc-windows-msvc                # x86
+cargo build --release --target aarch64-pc-windows-msvc             # ARM64
+
+target\release\winstats.exe                                        # x64
+target\i686-pc-windows-msvc\release\winstats.exe                   # x86
+target\aarch64-pc-windows-msvc\release\winstats.exe                # ARM64
 ```
 
-`rust-toolchain.toml` pins Rust 1.77 and both targets; rustup fetches them on the first build.
+`rust-toolchain.toml` pins Rust 1.77 and all three targets; rustup fetches them on the first build.
 
 The log goes to `%APPDATA%\winstats\winstats.log`.
 

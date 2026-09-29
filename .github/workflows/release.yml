@@ -1,0 +1,81 @@
+name: Release Windows binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload binaries to
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.architecture }}
+    runs-on: windows-2025
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            cargo-args: ""
+            binary-path: target/release/winstats.exe
+            asset-name: winstats.exe
+          - architecture: x86
+            cargo-args: --target i686-pc-windows-msvc
+            binary-path: target/i686-pc-windows-msvc/release/winstats.exe
+            asset-name: winstats-x86.exe
+          - architecture: ARM64
+            cargo-args: --target aarch64-pc-windows-msvc
+            binary-path: target/aarch64-pc-windows-msvc/release/winstats.exe
+            asset-name: winstats-arm64.exe
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Build winstats
+        run: cargo build --release ${{ matrix.cargo-args }}
+
+      - name: Stage release binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path staging | Out-Null
+          Copy-Item '${{ matrix.binary-path }}' "staging/${{ matrix.asset-name }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winstats-${{ matrix.architecture }}
+          path: staging/${{ matrix.asset-name }}
+          retention-days: 1
+
+  upload:
+    name: Upload release assets
+    runs-on: windows-2025
+    needs: build
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: winstats-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.tag || github.event.release.tag_name }}'
+          gh release upload --repo '${{ github.repository }}' $tag `
+            'artifacts/winstats.exe#winstats.exe' `
+            'artifacts/winstats-x86.exe#winstats-x86.exe' `
+            'artifacts/winstats-arm64.exe#winstats-arm64.exe' `
+            --clobber
