@@ -1,4 +1,4 @@
-name: Release Windows binaries
+name: Release binaries
 
 on:
   release:
@@ -14,8 +14,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.architecture }}
+  windows:
+    name: Windows ${{ matrix.architecture }}
     runs-on: windows-2025
 
     strategy:
@@ -23,59 +23,109 @@ jobs:
       matrix:
         include:
           - architecture: x64
-            cargo-args: ""
-            binary-path: target/release/winstats.exe
-            asset-name: winstats.exe
+            target: x86_64-pc-windows-msvc
+            suffix: ""
+            agent: x86_64
           - architecture: x86
-            cargo-args: --target i686-pc-windows-msvc
-            binary-path: target/i686-pc-windows-msvc/release/winstats.exe
-            asset-name: winstats-x86.exe
+            target: i686-pc-windows-msvc
+            suffix: -x86
+            agent: x86
           - architecture: ARM64
-            cargo-args: --target aarch64-pc-windows-msvc
-            binary-path: target/aarch64-pc-windows-msvc/release/winstats.exe
-            asset-name: winstats-arm64.exe
+            target: aarch64-pc-windows-msvc
+            suffix: -arm64
+            agent: arm64
 
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Build winstats
-        run: cargo build --release ${{ matrix.cargo-args }}
+      - name: Build winstats and the agent
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} -p winstats-agent
 
-      - name: Stage release binary
+      - name: Stage release binaries
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path staging | Out-Null
-          Copy-Item '${{ matrix.binary-path }}' "staging/${{ matrix.asset-name }}"
+          Copy-Item 'target/${{ matrix.target }}/release/winstats.exe' 'staging/winstats${{ matrix.suffix }}.exe'
+          Copy-Item 'target/${{ matrix.target }}/release/winstats-agent.exe' 'staging/winstats-agent-windows-${{ matrix.agent }}.exe'
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: winstats-${{ matrix.architecture }}
-          path: staging/${{ matrix.asset-name }}
+          name: windows-${{ matrix.architecture }}
+          path: staging/*
+          retention-days: 1
+
+  agent:
+    name: Agent ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds are static (musl) so one binary runs on any distribution
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
+          - name: macos-x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            musl: false
+          - name: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            musl: false
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build the agent
+        run: cargo build --release --target ${{ matrix.target }} -p winstats-agent
+
+      - name: Stage release binary
+        run: |
+          mkdir staging
+          cp 'target/${{ matrix.target }}/release/winstats-agent' 'staging/winstats-agent-${{ matrix.name }}'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.name }}
+          path: staging/*
           retention-days: 1
 
   upload:
     name: Upload release assets
-    runs-on: windows-2025
-    needs: build
+    runs-on: ubuntu-latest
+    needs: [windows, agent]
 
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: winstats-*
           path: artifacts
           merge-multiple: true
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: pwsh
         run: |
-          $tag = '${{ inputs.tag || github.event.release.tag_name }}'
-          gh release upload --repo '${{ github.repository }}' $tag `
-            'artifacts/winstats.exe#winstats.exe' `
-            'artifacts/winstats-x86.exe#winstats-x86.exe' `
-            'artifacts/winstats-arm64.exe#winstats-arm64.exe' `
-            --clobber
+          tag='${{ inputs.tag || github.event.release.tag_name }}'
+          ls -l artifacts
+          gh release upload --repo '${{ github.repository }}' "$tag" artifacts/* --clobber

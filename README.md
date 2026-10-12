@@ -260,7 +260,8 @@ in the config). Toggling interfaces and disks in the popups works the same way a
 ### The agent
 
 `winstats-agent` is one binary per platform; the [latest release](https://github.com/mgvs/winstats/releases/latest)
-ships it for Linux x86-64 and ARM64 (static, any distribution), macOS on Intel and Windows; other targets build from
+ships it for Linux x86-64 and ARM64 (static, any distribution), macOS on Intel and Apple Silicon, and Windows x64, x86
+and ARM64; every release is built by GitHub Actions (`.github/workflows/release.yml`). Other targets build from
 source with `cargo build --release -p winstats-agent` (Rust 1.77 or newer). It needs no configuration:
 
 ```
