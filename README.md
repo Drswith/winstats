@@ -312,7 +312,6 @@ cpu = "green"
 
 ## Limitations
 
-- Vertical taskbars are not supported.
 - Second monitor: the strip only lives on the primary taskbar.
 - Windows 11: the centred task list is XAML and cannot be shrunk, so with many open windows it runs over the strip.
   Workarounds: `position = "left"` (the area left of a centred list is usually free) or `mode = "floating"`.
