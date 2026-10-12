@@ -75,8 +75,10 @@ jobs:
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             musl: true
+          # both macOS builds run on Apple silicon; the Intel one is a cross build (the Intel
+          # runners are gone)
           - name: macos-x86_64
-            runner: macos-13
+            runner: macos-14
             target: x86_64-apple-darwin
             musl: false
           - name: macos-arm64
