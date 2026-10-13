@@ -237,7 +237,7 @@ Other machines on the network can show up in the same strip: a Linux box, a Mac,
 runs `winstats-agent` (or, on Windows, winstats itself with sharing on); winstats on your desk finds them, connects,
 and draws their widgets next to the local ones with their own colours and a label of their own.
 
-![two Linux nodes and a Mac next to the local widgets](docs/strip-remote.png)
+![a Linux node next to the local widgets](docs/strip-remote.png)
 
 | A remote machine's popup | The Remote machines menu |
 |---|---|
