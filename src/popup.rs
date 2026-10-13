@@ -109,6 +109,10 @@ pub struct Popup {
     content: Canvas,
     /// executable icons for the process lists
     icons: crate::procicon::IconCache,
+    /// layered window under the popup carrying its soft shadow (the non-layered modes cannot
+    /// paint outside their own rectangle); transparent to the mouse, never activated
+    shadow: HWND,
+    shadow_canvas: Canvas,
     pub kind: Option<Kind>,
     /// index of the strip widget the popup belongs to: a click on it closes the popup, a click
     /// on another widget of the same module just hands the popup over
@@ -170,8 +174,28 @@ fn create_window(hinstance: HINSTANCE, class: &str, native: crate::backdrop::Mod
 impl Popup {
     pub fn new(hinstance: HINSTANCE, class: &str, opacity: crate::backdrop::Opacity) -> Option<Self> {
         let (hwnd, backdrop, native) = create_window(hinstance, class, crate::backdrop::mode(), opacity)?;
+        let shadow = unsafe {
+            let cls = wide("WinStatsShadow");
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                pcwstr(&cls),
+                pcwstr(&cls),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                hinstance,
+                None,
+            )
+            .unwrap_or_default()
+        };
         Some(Self {
             hwnd,
+            shadow,
+            shadow_canvas: Canvas::new(),
             hinstance,
             class: class.to_string(),
             native,
@@ -321,6 +345,7 @@ impl Popup {
             let _ = reason;
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
+                let _ = ShowWindow(self.shadow, SW_HIDE);
             }
             self.visible = false;
             self.hidden_at = Some(Instant::now());
@@ -532,6 +557,16 @@ impl Popup {
                 let hdc = GetDC(self.hwnd);
                 self.canvas.paint_dc(hdc);
                 ReleaseDC(self.hwnd, hdc);
+                // the soft shadow in its own layered window right under the popup
+                let halo = blur + sh_dy;
+                let shadow = Color::rgba(0, 0, 0, if light { 26 } else { 70 });
+                self.shadow_canvas.resize(w + halo * 2, h + halo * 2);
+                self.shadow_canvas.clear();
+                self.shadow_canvas.fill_shadow(halo, halo, w, h, r, blur as f32, sh_dy, shadow);
+                let _ = SetWindowPos(self.shadow, self.hwnd, x - halo, y - halo, w + halo * 2, h + halo * 2, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                if let Err(e) = self.shadow_canvas.present_at(self.shadow, x - halo, y - halo) {
+                    crate::log!("shadow UpdateLayeredWindow failed: {e}");
+                }
             }
             if first {
                 let _ = SetForegroundWindow(self.hwnd);

@@ -99,6 +99,13 @@ pub fn mode() -> Mode {
     }
 }
 
+/// The framed window would get the heavy shadow of an application window from DWM; the popup
+/// draws its own soft one (a layered window underneath, see popup.rs), like the system flyouts.
+unsafe fn no_dwm_shadow(hwnd: HWND) {
+    let policy = DWMNCRP_DISABLED;
+    let _ = unsafe { DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as _, 4) };
+}
+
 /// Turn the backdrop on for `hwnd` (a non-layered popup) in the given theme; false when DWM
 /// refused, and the caller falls back to the layered window.
 /// A window that has had the system backdrop does not take the accent policy any more (it stays
@@ -116,12 +123,15 @@ pub fn apply(hwnd: HWND, mode: Mode, dark: bool, opacity: Opacity) -> bool {
             Mode::Layered => false,
             Mode::System => {
                 let backdrop = DWMSBT_TRANSIENTWINDOW;
-                DwmExtendFrameIntoClientArea(hwnd, &m).is_ok()
-                    && DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const _ as _, 4).is_ok()
+                let ok = DwmExtendFrameIntoClientArea(hwnd, &m).is_ok()
+                    && DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const _ as _, 4).is_ok();
+                no_dwm_shadow(hwnd);
+                ok
             }
             Mode::Accent => {
                 // tint as AABBGGRR over the blur, close to the flyouts
                 let color: u32 = if dark { 0x20_2020 } else { 0xF3_F3F3 };
+                no_dwm_shadow(hwnd);
                 set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, opacity.tint_alpha() << 24 | color)
             }
         }

@@ -236,6 +236,7 @@ fn main() {
         register_class(hinstance, "WinStatsHidden", Some(hidden_wndproc));
         register_class(hinstance, "WinStatsBar", Some(bar_wndproc));
         register_class(hinstance, "WinStatsPopup", Some(popup_wndproc));
+        register_class(hinstance, "WinStatsShadow", Some(shadow_wndproc));
         register_class(hinstance, "WinStatsAbout", Some(about_wndproc));
     }
 
@@ -1112,6 +1113,11 @@ unsafe extern "system" fn about_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// The popup's shadow window: nothing to handle, it never gets input.
+unsafe extern "system" fn shadow_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 unsafe extern "system" fn popup_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
