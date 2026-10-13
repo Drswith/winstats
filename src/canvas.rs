@@ -275,6 +275,27 @@ impl Canvas {
         }
     }
 
+    /// Soft drop shadow of a rounded rectangle fading out over `blur` px; only painted outside
+    /// the rectangle itself, so a translucent card drawn on top is not darkened.
+    pub fn fill_shadow(&mut self, x: i32, y: i32, w: i32, h: i32, r: f32, blur: f32, dy: i32, c: Color) {
+        let r = r.min(w as f32 / 2.0).min(h as f32 / 2.0).max(0.0);
+        let (cx, cy) = (x as f32 + w as f32 / 2.0, (y + dy) as f32 + h as f32 / 2.0);
+        let (hx, hy) = (w as f32 / 2.0 - r, h as f32 / 2.0 - r);
+        let b = blur.ceil() as i32;
+        for yy in (y + dy - b).max(0)..(y + dy + h + b).min(self.h) {
+            for xx in (x - b).max(0)..(x + w + b).min(self.w) {
+                let qx = (xx as f32 + 0.5 - cx).abs() - hx;
+                let qy = (yy as f32 + 0.5 - cy).abs() - hy;
+                let d = (qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r).max(0.0);
+                let f = (1.0 - d / blur).clamp(0.0, 1.0);
+                let cov = f * f * (1.0 - round_rect_coverage(xx, yy, x, y, w, h, r));
+                if cov > 0.0 {
+                    self.blend_px(xx, yy, c, cov);
+                }
+            }
+        }
+    }
+
     /// Antialiased 1px rounded outline.
     pub fn stroke_round_rect_r(&mut self, x: i32, y: i32, w: i32, h: i32, r: f32, c: Color) {
         let r = r.min(w as f32 / 2.0).min(h as f32 / 2.0).max(0.0);
@@ -437,6 +458,22 @@ impl Canvas {
     /// Push the framebuffer to a top-level layered window and move it to screen (x, y).
     pub fn present_at(&mut self, hwnd: HWND, x: i32, y: i32) -> windows::core::Result<()> {
         self.present_impl(hwnd, Some(POINT { x, y }))
+    }
+
+    /// Copy the framebuffer, alpha included, onto a window DC (a non-layered window whose
+    /// client area DWM composites with that alpha over a backdrop).
+    pub fn paint_dc(&mut self, hdc: HDC) {
+        if self.dib.as_ref().map(|d| d.w != self.w || d.h != self.h).unwrap_or(true) {
+            match Dib::new(self.w, self.h) {
+                Ok(d) => self.dib = Some(d),
+                Err(_) => return,
+            }
+        }
+        let dib = self.dib.as_mut().unwrap();
+        dib.copy_from(&self.px);
+        unsafe {
+            let _ = BitBlt(hdc, 0, 0, self.w, self.h, dib.hdc, 0, 0, SRCCOPY);
+        }
     }
 
     fn present_impl(&mut self, hwnd: HWND, dst: Option<POINT>) -> windows::core::Result<()> {

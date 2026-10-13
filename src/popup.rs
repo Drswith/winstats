@@ -9,12 +9,13 @@ use crate::widgets::{Kind, Theme};
 use std::time::Instant;
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
 use windows::Win32::Foundation::{HINSTANCE, HWND, RECT};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, GetDC, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, ReleaseDC};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WIDTH_DIP: f32 = 300.0;
 const PAD_DIP: f32 = 14.0;
 const RADIUS_DIP: f32 = 10.0;
+const SHADOW_DIP: f32 = 14.0;
 
 pub const DOWN: Color = Color::rgb(0x2E, 0x9C, 0xF6);
 pub const UP: Color = Color::rgb(0xF4, 0x43, 0x36);
@@ -124,31 +125,59 @@ pub struct Popup {
     /// what the fixed height was computed for: row counts that change the layout (an adapter
     /// or a drive came or went); a change lets the height be recomputed
     shape: Option<(Kind, usize, usize, usize)>,
+    /// how the window background is drawn: DWM acrylic or the self-drawn layered card
+    /// the best background this Windows offers (Layered when DWM refused)
+    native: crate::backdrop::Mode,
+    /// the background in use: `native`, or the accent policy for "more transparent"
+    backdrop: crate::backdrop::Mode,
+    /// what the DWM background was last set up for: mode, dark theme, opacity
+    applied: Option<(crate::backdrop::Mode, bool, crate::backdrop::Opacity)>,
+    /// background opacity from the menu
+    pub opacity: crate::backdrop::Opacity,
+    /// for re-creating the window: DWM does not take a backdrop change on a window that has had one
+    hinstance: HINSTANCE,
+    class: String,
+}
+
+/// The popup window with the background for `opacity`; returns it with the mode in use and the
+/// native mode, which drops to Layered when DWM refuses every backdrop.
+fn create_window(hinstance: HINSTANCE, class: &str, native: crate::backdrop::Mode, opacity: crate::backdrop::Opacity) -> Option<(HWND, crate::backdrop::Mode, crate::backdrop::Mode)> {
+    use crate::backdrop::{Mode, apply, mode_for};
+    let cls = wide(class);
+    let title = wide("winstats popup");
+    let want = mode_for(native, opacity);
+    let layered = if want == Mode::Layered { WS_EX_LAYERED } else { WINDOW_EX_STYLE(0) };
+    // DWM gives a backdrop only to framed windows; the frame itself is cut away in WM_NCCALCSIZE
+    let style = if want == Mode::Layered { WS_POPUP } else { WS_POPUP | WS_THICKFRAME };
+    let hwnd = unsafe {
+        CreateWindowExW(layered | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, pcwstr(&cls), pcwstr(&title), style, 0, 0, 10, 10, None, None, hinstance, None).ok()?
+    };
+    if want == Mode::Layered || apply(hwnd, want, false, opacity) {
+        return Some((hwnd, want, native));
+    }
+    if want != native && apply(hwnd, native, false, opacity) {
+        crate::log!("popup backdrop {want:?} refused, using {native:?}");
+        return Some((hwnd, native, native));
+    }
+    crate::log!("popup backdrop {want:?} refused, falling back to a layered window");
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as _);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST).0 as _);
+    }
+    Some((hwnd, Mode::Layered, Mode::Layered))
 }
 
 impl Popup {
-    pub fn new(hinstance: HINSTANCE, class: &str) -> Option<Self> {
-        let cls = wide(class);
-        let title = wide("winstats popup");
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                pcwstr(&cls),
-                pcwstr(&title),
-                WS_POPUP,
-                0,
-                0,
-                10,
-                10,
-                None,
-                None,
-                hinstance,
-                None,
-            )
-            .ok()?
-        };
+    pub fn new(hinstance: HINSTANCE, class: &str, opacity: crate::backdrop::Opacity) -> Option<Self> {
+        let (hwnd, backdrop, native) = create_window(hinstance, class, crate::backdrop::mode(), opacity)?;
         Some(Self {
             hwnd,
+            hinstance,
+            class: class.to_string(),
+            native,
+            backdrop,
+            applied: None,
+            opacity,
             canvas: Canvas::new(),
             content: Canvas::new(),
             icons: Default::default(),
@@ -368,6 +397,18 @@ impl Popup {
         }
     }
 
+    /// WM_PAINT of the DWM-backed window: put the last frame back.
+    pub fn paint(&mut self) {
+        unsafe {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(self.hwnd, &mut ps);
+            if self.backdrop != crate::backdrop::Mode::Layered {
+                self.canvas.paint_dc(hdc);
+            }
+            let _ = EndPaint(self.hwnd, &ps);
+        }
+    }
+
     pub fn render(&mut self, t: &Theme, light: bool, m: &MetricsData, first: bool) {
         let Some(kind) = self.kind else { return };
         if !self.visible {
@@ -376,6 +417,28 @@ impl Popup {
         self.light = light;
         let w = t.s(WIDTH_DIP);
         let pad = t.s(PAD_DIP);
+        // the layered window gets no DWM shadow: a soft one is painted around the card instead
+        let layered = self.native == crate::backdrop::Mode::Layered;
+        let blur = t.s(SHADOW_DIP);
+        let sh_dy = t.s(2.0);
+        let sh = if layered { blur + sh_dy } else { 0 };
+        if !layered {
+            // system material <-> accent policy: only a new window takes the other one
+            if crate::backdrop::mode_for(self.native, self.opacity) != self.backdrop {
+                if let Some((hwnd, backdrop, native)) = create_window(self.hinstance, &self.class, self.native, self.opacity) {
+                    unsafe {
+                        let _ = DestroyWindow(self.hwnd);
+                    }
+                    (self.hwnd, self.backdrop, self.native) = (hwnd, backdrop, native);
+                    self.applied = None;
+                }
+            }
+            let key = (self.backdrop, !light, self.opacity);
+            if self.applied != Some(key) {
+                self.applied = Some(key);
+                crate::backdrop::apply(self.hwnd, self.backdrop, !light, self.opacity);
+            }
+        }
 
         let shape = Some((kind, m.net_ifaces.len(), m.disks.len(), m.drives.len()));
         if shape != self.shape {
@@ -399,13 +462,13 @@ impl Popup {
         let end_y = ui.y;
         // pie geometry from content coords to window coords
         self.pie = ui.pie.take().map(|mut p| {
-            p.cx += pad as f32;
-            p.cy += pad as f32;
+            p.cx += (sh + pad) as f32;
+            p.cy += (sh + pad) as f32;
             p
         });
         self.tips = std::mem::take(&mut ui.tips);
         self.hits = std::mem::take(&mut ui.hits);
-        self.pad = pad;
+        self.pad = sh + pad;
         if self.tip.map_or(false, |i| i >= self.tips.len()) {
             self.tip = None;
         }
@@ -416,13 +479,24 @@ impl Popup {
         self.locked_h = h;
 
         // pass 2: background + content
-        self.canvas.resize(w, h);
+        self.canvas.resize(w + sh * 2, h + sh * 2);
         self.canvas.clear();
-        let bg = if light { Color::rgba(0xF9, 0xF9, 0xF9, 244) } else { Color::rgba(0x20, 0x20, 0x20, 244) };
+        let card = |a: u8| if light { Color::rgba(0xF9, 0xF9, 0xF9, a) } else { Color::rgba(0x20, 0x20, 0x20, a) };
+        let bg = card(self.opacity.card_alpha());
         let r = t.s(RADIUS_DIP) as f32;
-        self.canvas.fill_round_rect(0, 0, w, h, r, bg);
-        self.canvas.stroke_round_rect_r(0, 0, w, h, r, t.dim.alpha(0.35));
-        self.canvas.blit(&self.content, pad, pad);
+        let overlay = self.opacity.overlay();
+        if self.backdrop == crate::backdrop::Mode::System && overlay > 0.0 {
+            // the system material cannot be thickened: a theme fill over it does that
+            self.canvas.fill_rect(0, 0, w, h, card((overlay * 255.0).round() as u8));
+        }
+        if layered {
+            // like the DWM one: just a faint wide halo, no dark rim
+            let shadow = Color::rgba(0, 0, 0, if light { 26 } else { 70 });
+            self.canvas.fill_shadow(sh, sh, w, h, r, blur as f32, sh_dy, shadow);
+            self.canvas.fill_round_rect(sh, sh, w, h, r, bg);
+            self.canvas.stroke_round_rect_r(sh, sh, w, h, r, t.dim.alpha(0.35));
+        }
+        self.canvas.blit(&self.content, sh + pad, sh + pad);
 
         // position: above (or below) the taskbar, centred on the clicked widget
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -448,9 +522,16 @@ impl Popup {
 
         unsafe {
             let flags = if first { SWP_SHOWWINDOW } else { SWP_SHOWWINDOW | SWP_NOACTIVATE };
-            let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, w, h, flags);
-            if let Err(e) = self.canvas.present_at(self.hwnd, x, y) {
-                crate::log!("popup UpdateLayeredWindow failed: {e}");
+            let (x, y) = (x - sh, y - sh);
+            let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, w + sh * 2, h + sh * 2, flags);
+            if layered {
+                if let Err(e) = self.canvas.present_at(self.hwnd, x, y) {
+                    crate::log!("popup UpdateLayeredWindow failed: {e}");
+                }
+            } else {
+                let hdc = GetDC(self.hwnd);
+                self.canvas.paint_dc(hdc);
+                ReleaseDC(self.hwnd, hdc);
             }
             if first {
                 let _ = SetForegroundWindow(self.hwnd);
@@ -813,9 +894,10 @@ impl Ui<'_> {
     /// icon into a kill button (remote machines only send names).
     fn processes(&mut self, list: &[crate::metrics::processes::ProcInfo], mode: ProcMode, n: usize, local: bool) {
         let text_h = self.c.measure_text("X", self.font(11.0, FW_NORMAL)).1;
-        let gap = self.t.s(3.0);
-        let row_h = text_h + gap;
         let icon = if local { self.t.s(16.0) } else { 0 };
+        // at 100% scaling the text is barely taller than an icon, so keep some air between icons
+        let gap = self.t.s(3.0).max(icon + self.t.s(7.0) - text_h);
+        let row_h = text_h + gap;
         let inset = self.t.s(2.0);
         if !local {
             self.locks.clear();
@@ -846,7 +928,7 @@ impl Ui<'_> {
             let f = self.font(10.5, FW_NORMAL);
             let text = if mode == ProcMode::Io { t("popup.nothing_io") } else { t("popup.collecting") };
             self.c.draw_text(&text, 0, self.y, f, self.t.dim);
-            self.y += row_h * n as i32;
+            self.y += row_h * n as i32 - (gap - self.t.s(3.0));
             return;
         }
         let mut rest = list.iter().filter(|p| !pinned.contains(&p.pid));
@@ -904,11 +986,15 @@ impl Ui<'_> {
             // a 32-bit process on 64-bit Windows is marked; local only (agents do not report it)
             let tag = if local && self.icons.is_32bit(p.pid) { Some(t("popup.bits32")) } else { None };
             self.proc_row(&p.name, tag.as_deref(), &value);
+            // proc_row steps by the text height alone; rows here are taller to fit the icons
+            self.y = top + gap / 2 + row_h;
             self.indent = 0;
             if local {
                 self.hits.push(Hit { x: 0, y: top, w: self.w, h: row_h, action: Action::LockProc(row, p) });
             }
         }
+        // the extra air between icon rows is not wanted below the last one
+        self.y -= gap - self.t.s(3.0);
     }
 }
 

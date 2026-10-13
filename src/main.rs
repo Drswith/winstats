@@ -6,6 +6,7 @@ mod i18n;
 mod menu;
 mod metrics;
 mod about;
+mod backdrop;
 mod popup;
 mod procicon;
 mod remote;
@@ -31,7 +32,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 /// lives in the UI.Controls feature of the windows crate, which is not enabled
 const WM_MOUSELEAVE: u32 = 0x02A3;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT};
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -283,7 +284,7 @@ fn main() {
         }
     }
     let widgets = widgets::build(&cfg.widgets);
-    let popup = Popup::new(hinstance, "WinStatsPopup").expect("popup window");
+    let popup = Popup::new(hinstance, "WinStatsPopup", backdrop::Opacity::from_config(&cfg.popup_opacity)).expect("popup window");
     let about = About::new(hinstance, "WinStatsAbout").expect("about window");
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
@@ -1131,6 +1132,19 @@ unsafe extern "system" fn popup_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             });
             LRESULT(0)
         }
+        WM_PAINT => {
+            // the DWM-backed popup keeps no layered bitmap: repaint the last frame
+            if with_app(|app| app.popup.paint()).is_none() {
+                let mut ps = PAINTSTRUCT::default();
+                BeginPaint(hwnd, &mut ps);
+                let _ = EndPaint(hwnd, &ps);
+            }
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        // the DWM-backed popup has a frame only to get the backdrop: no non-client area, no resizing
+        WM_NCCALCSIZE if wparam.0 != 0 => LRESULT(0),
+        WM_NCHITTEST => LRESULT(HTCLIENT as isize),
         WM_TIMER if wparam.0 == popup::COPY_TIMER => {
             // copy flash frames; the render ends the timer when the flash is over
             with_app(|app| {
@@ -1182,6 +1196,10 @@ const MENU_POS_LEFT: usize = 211;
 const MENU_THEME_AUTO: usize = 220;
 const MENU_THEME_DARK: usize = 221;
 const MENU_THEME_LIGHT: usize = 222;
+/// popup background opacity: MENU_OPACITY_BASE + index in POPUP_OPACITY
+const MENU_OPACITY_BASE: usize = 225;
+const POPUP_OPACITY: [(&str, &str); 4] =
+    [("more", "menu.opacity_more"), ("system", "menu.opacity_system"), ("less", "menu.opacity_less"), ("solid", "menu.opacity_solid")];
 const MENU_INTERVAL_BASE: usize = 230;
 /// per-module colour: MENU_COLOR_BASE + module_index * 20 + entry
 const MENU_COLOR_BASE: usize = 300;
@@ -1480,6 +1498,12 @@ unsafe fn build_menu(st: &MenuState) -> Option<HMENU> {
         menu_item(theme, MENU_THEME_DARK, &t("menu.theme_dark"), cfg.theme == "dark");
         menu_item(theme, MENU_THEME_LIGHT, &t("menu.theme_light"), cfg.theme == "light");
         menu_submenu(menu, theme, &t("menu.theme"));
+
+        let opacity = CreatePopupMenu().ok()?;
+        for (i, (value, key)) in POPUP_OPACITY.iter().enumerate() {
+            menu_item(opacity, MENU_OPACITY_BASE + i, &t(key), cfg.popup_opacity == *value);
+        }
+        menu_submenu(menu, opacity, &t("menu.popup_opacity"));
 
         let lang = CreatePopupMenu().ok()?;
         menu_item(lang, MENU_LANG_BASE, &t("menu.lang_system"), cfg.language == "auto");
@@ -1955,6 +1979,10 @@ impl App {
             MENU_THEME_AUTO => self.cfg.theme = "auto".into(),
             MENU_THEME_DARK => self.cfg.theme = "dark".into(),
             MENU_THEME_LIGHT => self.cfg.theme = "light".into(),
+            c if (MENU_OPACITY_BASE..MENU_OPACITY_BASE + POPUP_OPACITY.len()).contains(&c) => {
+                self.cfg.popup_opacity = POPUP_OPACITY[c - MENU_OPACITY_BASE].0.into();
+                self.popup.opacity = backdrop::Opacity::from_config(&self.cfg.popup_opacity);
+            }
             c if (MENU_INTERVAL_BASE..MENU_INTERVAL_BASE + INTERVALS.len()).contains(&c) => {
                 self.cfg.update_ms = INTERVALS[c - MENU_INTERVAL_BASE].0;
                 interval_changed = true;

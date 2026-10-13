@@ -27,6 +27,8 @@ pub struct Config {
     pub colors: BTreeMap<String, String>,
     /// Force theme: "auto" | "dark" | "light"
     pub theme: String,
+    /// Popup background: "more" (thinner than the system material) | "system" | "less" | "solid"
+    pub popup_opacity: String,
     /// Text size multiplier for widgets: 0.85 | 1.0 | 1.15 | 1.3
     pub font_scale: f32,
     /// Show P-cores first, then E-cores, instead of the hardware order Windows uses.
@@ -92,6 +94,7 @@ impl Default for Config {
             accent: "blue".into(),
             colors: BTreeMap::new(),
             theme: "auto".into(),
+            popup_opacity: "system".into(),
             font_scale: 1.0,
             group_pe_cores: false,
             split_pe_cores: true,
