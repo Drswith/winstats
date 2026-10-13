@@ -58,6 +58,17 @@ rises (RAM at 67% is already yellow here):
 
 ![by utilisation](docs/strip-utilization.png)
 
+A taskbar docked at the left or right edge gets a column instead of a strip: the widgets go into rows as wide as the
+taskbar, as many per row as fit, and any chart can be set to *Stretch chart* in its module menu to take what is
+left of its row next to the fixed-width widgets. Popups open beside the taskbar. Mixed rows with the CPU and disk
+charts stretched, every chart stretched, and the text widgets:
+
+| | | |
+|---|---|---|
+| ![rows of widgets](docs/vertical-rows.png) | ![stretched charts](docs/vertical-charts.png) | ![text widgets](docs/vertical-compact.png) |
+
+![popup beside a vertical taskbar](docs/vertical-popup.png)
+
 ## Download
 
 Grab `winstats.exe` (x64), `winstats-x86.exe` (x86) or `winstats-arm64.exe` (ARM64) from the
@@ -72,6 +83,8 @@ executable. The same page has `winstats-agent` for the other machines you want t
 | 10 | yes | yes | yes | child of the taskbar; the task list is shrunk to make room |
 | 8 / 8.1 | yes | yes | no | same as 10, no GPU load (the counters appeared in Windows 10) |
 | 7 SP1 | yes | yes | no | the strip is an always-on-top window floating over the taskbar (Windows 7 cannot host a layered child); it hides itself while a full-screen Direct3D game or a presentation is in front; no GPU load, no VRAM |
+
+A taskbar docked at the left or right edge is supported as well: the widgets are stacked in rows (see Screenshots).
 
 The hosting mode is picked automatically (`mode = "auto"` in the config): floating on Windows 7, embedded elsewhere.
 `mode = "floating"` forces the floating window on any version, which is also a way around the Windows 11 task-list
@@ -157,6 +170,7 @@ offset = 0              # shift from that edge, in DIP
 widgets = ["cpu_bars", "cpu_line", "mem", "gpu", "net", "disk", "battery"]
 update_ms = 1000
 labels = true           # vertical CPU / NET / DSK labels like in Stats
+stretched = []          # vertical taskbar: charts that fill the rest of their row ("cpu_line", "pi4/net_chart")
 disk = "C:"
 accent = "blue"         # palette name, "system" (Windows accent colour) or "#RRGGBB"
 theme = "auto"          # auto | dark | light
