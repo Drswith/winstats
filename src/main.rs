@@ -710,6 +710,35 @@ impl App {
         }
     }
 
+    /// Where the settings menu opens: flush against the taskbar on the side away from the
+    /// screen edge, so it never covers the strip, whatever the DPI. The pointer only picks the
+    /// position along the taskbar.
+    fn menu_anchor(&self) -> (POINT, TRACK_POPUP_MENU_FLAGS) {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let Some(tb) = self.taskbar.as_ref() else { return (pt, TPM_LEFTALIGN | TPM_BOTTOMALIGN) };
+        let mut rc = RECT::default();
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        unsafe {
+            let _ = GetWindowRect(tb.tray, &mut rc);
+            let _ = GetMonitorInfoW(MonitorFromWindow(tb.tray, MONITOR_DEFAULTTONEAREST), &mut mi);
+        }
+        let mon = mi.rcMonitor;
+        if tb.vertical() {
+            if rc.left <= mon.left + 10 {
+                (POINT { x: rc.right, y: pt.y }, TPM_LEFTALIGN | TPM_BOTTOMALIGN)
+            } else {
+                (POINT { x: rc.left, y: pt.y }, TPM_RIGHTALIGN | TPM_BOTTOMALIGN)
+            }
+        } else if rc.top > mon.top + 10 {
+            (POINT { x: pt.x, y: rc.top }, TPM_LEFTALIGN | TPM_BOTTOMALIGN)
+        } else {
+            (POINT { x: pt.x, y: rc.bottom }, TPM_LEFTALIGN | TPM_TOPALIGN)
+        }
+    }
+
     /// Bar-client (x, y) as (position along the strip, position across it).
     fn axes(&self, x: i32, y: i32) -> (i32, i32) {
         if self.taskbar.as_ref().map_or(false, |t| t.vertical()) {
@@ -1592,6 +1621,9 @@ struct MenuState {
     dpi: u32,
     /// the taskbar is docked at a side: the vertical-layout items are shown
     vertical: bool,
+    /// where the menu opens and which corner of it sits there (see `App::menu_anchor`)
+    anchor: POINT,
+    align: TRACK_POPUP_MENU_FLAGS,
 }
 
 /// Snapshot for the menu. `fresh` re-reads the remote list; a refresh while the menu is open
@@ -1611,6 +1643,8 @@ fn menu_state(fresh: bool) -> Option<MenuState> {
             remotes,
             dpi: app.taskbar.as_ref().map(|t| t.dpi()).or_else(|| util::dpi_for_window(app.hidden)).unwrap_or(96),
             vertical: app.taskbar.as_ref().map_or(false, |t| t.vertical()),
+            anchor: app.menu_anchor().0,
+            align: app.menu_anchor().1,
         }
     })
 }
@@ -1678,10 +1712,8 @@ fn show_menu() {
             menu::free_bitmaps();
             return;
         };
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(st.hidden);
-        let r = menu::track(st.hidden, menu, pt, menu_sticky, menu_command, menu_rebuild);
+        let r = menu::track(st.hidden, menu, st.anchor, st.align, menu_sticky, menu_command, menu_rebuild);
         let _ = PostMessageW(st.hidden, WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         menu::free_bitmaps();

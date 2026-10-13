@@ -11,29 +11,26 @@ rates):
 
 ![taskbar strip](docs/strip.png)
 
-Click a widget for its popup:
+Click a widget for its popup (the Network one shows the tooltip that opens over a label that did not fit):
 
-| CPU | Network |
-|---|---|
-| ![CPU popup](docs/popup-cpu.png) | ![Network popup](docs/popup-network.png) |
-
-| Memory (a pie slice under the mouse) | Disk | GPU |
+| CPU | Network | Memory |
 |---|---|---|
-| ![Memory popup](docs/popup-memory.png) | ![Disk popup](docs/popup-disk.png) | ![GPU popup](docs/popup-gpu.png) |
+| ![CPU popup](docs/popup-cpu.png) | ![Network popup](docs/popup-network.png) | ![Memory popup](docs/popup-memory.png) |
 
-The Network popup above shows the tooltip that opens over a label that did not fit.
+| Disk | GPU | CPU of a remote ARM node |
+|---|---|---|
+| ![Disk popup](docs/popup-disk.png) | ![GPU popup](docs/popup-gpu.png) | ![CPU popup of an ARM node](docs/popup-remote-cpu.png) |
 
-Right click for the settings menu:
+Right click for the settings menu. The interface comes in 29 languages (see Configuration); the menu in
+English and Ukrainian, the popups in Greek and Ukrainian:
 
-![context menu](docs/menu.png)
-
-The interface comes in 29 languages (see Configuration); Greek and Ukrainian here:
+| Settings menu | The same in Ukrainian |
+|---|---|
+| ![context menu](docs/menu.png) | ![context menu in Ukrainian](docs/menu-uk.png) |
 
 | CPU popup, Greek | Memory popup, Ukrainian |
 |---|---|
 | ![CPU popup in Greek](docs/popup-cpu-el.png) | ![Memory popup in Ukrainian](docs/popup-memory-uk.png) |
-
-![context menu in Ukrainian](docs/menu-uk.png)
 
 A few other ways to set it up (everything below is picked from the menu or written in the config):
 
@@ -239,9 +236,9 @@ and draws their widgets next to the local ones with their own colours and a labe
 
 ![a Linux node next to the local widgets](docs/strip-remote.png)
 
-| A remote machine's popup | The Remote machines menu |
-|---|---|
-| ![CPU popup of an ARM node](docs/popup-remote-cpu.png) | ![Remote machines menu](docs/menu-remote.png) |
+The Remote machines menu, with one node connected:
+
+![Remote machines menu](docs/menu-remote.png)
 
 How it fits together:
 

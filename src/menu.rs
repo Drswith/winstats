@@ -132,10 +132,10 @@ pub fn free_bitmaps() {
 /// `apply(id)` runs one, `rebuild()` returns a fresh tree reflecting the new state (its check
 /// marks and titles are copied onto the open menu, then it is destroyed). Returns the command
 /// chosen the ordinary way (Enter or a non-sticky click), 0 when the menu was dismissed.
-pub unsafe fn track(owner: HWND, root: HMENU, pt: POINT, sticky: fn(u32) -> bool, apply: fn(u32), rebuild: fn() -> Option<HMENU>) -> u32 {
+pub unsafe fn track(owner: HWND, root: HMENU, pt: POINT, align: TRACK_POPUP_MENU_FLAGS, sticky: fn(u32) -> bool, apply: fn(u32), rebuild: fn() -> Option<HMENU>) -> u32 {
     TRACK.with(|t| *t.borrow_mut() = Some(Track { owner, root, sticky, apply, rebuild, swallow_up: false }));
     let hook = unsafe { SetWindowsHookExW(WH_MSGFILTER, Some(hook_proc), None, GetCurrentThreadId()) }.ok();
-    let r = unsafe { TrackPopupMenu(root, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, owner, None) };
+    let r = unsafe { TrackPopupMenu(root, TPM_RETURNCMD | TPM_RIGHTBUTTON | align, pt.x, pt.y, 0, owner, None) };
     if let Some(h) = hook {
         unsafe {
             let _ = UnhookWindowsHookEx(h);
