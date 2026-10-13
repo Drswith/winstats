@@ -557,15 +557,21 @@ impl Popup {
                 let hdc = GetDC(self.hwnd);
                 self.canvas.paint_dc(hdc);
                 ReleaseDC(self.hwnd, hdc);
-                // the soft shadow in its own layered window right under the popup
-                let halo = blur + sh_dy;
-                let shadow = Color::rgba(0, 0, 0, if light { 26 } else { 70 });
-                self.shadow_canvas.resize(w + halo * 2, h + halo * 2);
-                self.shadow_canvas.clear();
-                self.shadow_canvas.fill_shadow(halo, halo, w, h, r, blur as f32, sh_dy, shadow);
-                let _ = SetWindowPos(self.shadow, self.hwnd, x - halo, y - halo, w + halo * 2, h + halo * 2, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                if let Err(e) = self.shadow_canvas.present_at(self.shadow, x - halo, y - halo) {
-                    crate::log!("shadow UpdateLayeredWindow failed: {e}");
+                // the Windows 11 transient backdrop brings the faint flyout shadow of its own;
+                // the Windows 10 accent policy does not, so a faint one goes into the layered
+                // window underneath
+                if self.backdrop == crate::backdrop::Mode::Accent {
+                    let halo = blur + sh_dy;
+                    let shadow = Color::rgba(0, 0, 0, if light { 16 } else { 48 });
+                    self.shadow_canvas.resize(w + halo * 2, h + halo * 2);
+                    self.shadow_canvas.clear();
+                    self.shadow_canvas.fill_shadow(halo, halo, w, h, r, blur as f32, sh_dy, shadow);
+                    let _ = SetWindowPos(self.shadow, self.hwnd, x - halo, y - halo, w + halo * 2, h + halo * 2, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    if let Err(e) = self.shadow_canvas.present_at(self.shadow, x - halo, y - halo) {
+                        crate::log!("shadow UpdateLayeredWindow failed: {e}");
+                    }
+                } else {
+                    let _ = ShowWindow(self.shadow, SW_HIDE);
                 }
             }
             if first {
