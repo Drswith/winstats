@@ -60,7 +60,7 @@ taskbar, as many per row as fit, and any chart can be set to *Stretch chart* in 
 left of its row next to the fixed-width widgets. Popups open beside the taskbar. Mixed rows with the CPU and disk
 charts stretched, every chart stretched, and the text widgets:
 
-| | | |
+| Combined | Full length | Short |
 |---|---|---|
 | ![rows of widgets](docs/vertical-rows.png) | ![stretched charts](docs/vertical-charts.png) | ![text widgets](docs/vertical-compact.png) |
 
