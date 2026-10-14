@@ -1480,6 +1480,9 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
     if let Some(mhz) = p.core_mhz {
         ui.row(&t("popup.clock"), &clock_now_max(mhz, p.core_max_mhz));
     }
+    if let Some(mhz) = p.mem_mhz {
+        ui.row(&t("popup.mem_clock"), &clock_now_max(mhz, p.mem_max_mhz));
+    }
     match (p.power_w, p.power_limit_w, p.power) {
         (Some(w), Some(l), _) => ui.row(&t("popup.power"), &format!("{w:.0} / {l:.0} {}", unit("w"))),
         (Some(w), None, _) => ui.row(&t("popup.power"), &format!("{w:.0} {}", unit("w"))),
@@ -1495,9 +1498,6 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
     // the rest folds away under "More"
     let more = ui.expanded.contains("more:gpu");
     if more {
-        if let Some(mhz) = p.mem_mhz {
-            ui.row(&t("popup.mem_clock"), &clock_now_max(mhz, p.mem_max_mhz));
-        }
         match (p.fan_pct, p.fan_rpm) {
             (Some(f), Some(r)) => ui.row(&t("popup.fan"), &format!("{f}% · {r} {}", unit("rpm"))),
             (Some(f), None) => ui.row(&t("popup.fan"), &format!("{f}%")),
