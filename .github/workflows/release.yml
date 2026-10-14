@@ -118,16 +118,42 @@ jobs:
     needs: [windows, agent]
 
     steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      # winstats as bare exes plus one zip per architecture (the exe as winstats.exe with README
+      # and LICENSE); every agent in one zip, packed here on Linux so the Unix ones keep +x
+      - name: Pack release assets
+        run: |
+          tag='${{ inputs.tag || github.event.release.tag_name }}'
+          version="${tag#v}"
+          mkdir release
+          cp artifacts/winstats.exe artifacts/winstats-x86.exe artifacts/winstats-arm64.exe release/
+          for pair in win64: win32:-x86 arm64:-arm64; do
+            name="${pair%%:*}"
+            suffix="${pair#*:}"
+            dir="pack-$name"
+            mkdir "$dir"
+            cp "artifacts/winstats$suffix.exe" "$dir/winstats.exe"
+            cp README.md LICENSE "$dir/"
+            (cd "$dir" && zip -9 -q "../release/winstats-$version-$name.zip" winstats.exe README.md LICENSE)
+          done
+          mkdir agents
+          cp artifacts/winstats-agent-* agents/
+          chmod +x agents/winstats-agent-linux-* agents/winstats-agent-macos-*
+          cp README.md LICENSE agents/
+          (cd agents && zip -9 -q "../release/winstats-agent-$version.zip" *)
+          ls -l release
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag='${{ inputs.tag || github.event.release.tag_name }}'
-          ls -l artifacts
-          gh release upload --repo '${{ github.repository }}' "$tag" artifacts/* --clobber
+          gh release upload --repo '${{ github.repository }}' "$tag" release/* --clobber

@@ -69,8 +69,10 @@ charts stretched, every chart stretched, and the text widgets:
 ## Download
 
 Grab `winstats.exe` (x64), `winstats-x86.exe` (x86) or `winstats-arm64.exe` (ARM64) from the
-[latest release](https://github.com/mgvs/winstats/releases/latest) and run it. No installer, no runtime, a single
-executable. The same page has `winstats-agent` for the other machines you want to watch (see Remote machines).
+[latest release](https://github.com/mgvs/winstats/releases/latest) and run it, or the matching
+`winstats-<version>-win64.zip`, `-win32.zip` or `-arm64.zip` with README and LICENSE. No installer, no runtime, a
+single executable. The same page has `winstats-agent-<version>.zip` with the agent for the other machines you want to
+watch (see Remote machines).
 
 ## Supported systems
 
@@ -276,9 +278,11 @@ in the config). Toggling interfaces and disks in the popups works the same way a
 
 ### The agent
 
-`winstats-agent` is one binary per platform; the [latest release](https://github.com/mgvs/winstats/releases/latest)
-ships it for Linux x86-64 and ARM64 (static, any distribution), macOS on Intel and Apple Silicon, and Windows x64, x86
-and ARM64; every release is built by GitHub Actions (`.github/workflows/release.yml`). Other targets build from
+`winstats-agent` is one binary per platform; `winstats-agent-<version>.zip` in the
+[latest release](https://github.com/mgvs/winstats/releases/latest) holds all of them: `winstats-agent-linux-x86_64`
+and `-linux-aarch64` (static, any distribution), `-macos-x86_64` and `-macos-arm64`, and
+`winstats-agent-windows-x86_64.exe`, `-x86.exe` and `-arm64.exe`; take the one for the machine and run it (the zip
+keeps the Unix ones executable). Every release is built by GitHub Actions (`.github/workflows/release.yml`). Other targets build from
 source with `cargo build --release -p winstats-agent` (Rust 1.77 or newer). It needs no configuration:
 
 ```
