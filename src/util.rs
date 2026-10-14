@@ -68,6 +68,24 @@ pub fn windows_build() -> u32 {
     info.dwBuildNumber
 }
 
+/// Load a DLL from System32 by its full path (vendor libraries the drivers install there):
+/// never picked up from the working directory or PATH. None when it is not there.
+pub fn load_system_dll(name: PCWSTR) -> Option<windows::Win32::Foundation::HMODULE> {
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut dir = [0u16; 260];
+    let n = unsafe { GetSystemDirectoryW(Some(&mut dir)) } as usize;
+    if n == 0 || n >= dir.len() {
+        return None;
+    }
+    let name = unsafe { name.as_wide() };
+    let mut path: Vec<u16> = dir[..n].to_vec();
+    path.push(b'\\' as u16);
+    path.extend_from_slice(name);
+    path.push(0);
+    unsafe { LoadLibraryW(PCWSTR(path.as_ptr())).ok() }
+}
+
 /// Windows 8 is build 9200; anything older cannot host layered child windows.
 pub fn is_windows7() -> bool {
     windows_build() < 9200
@@ -146,19 +164,49 @@ macro_rules! log {
     ($($arg:tt)*) => { $crate::util::log(&format!($($arg)*)) };
 }
 
-pub fn format_bytes_rate(bps: f64) -> String {
-    let b = bps.max(0.0);
-    if b < 1024.0 {
-        format!("{:.0} B/s", b)
-    } else if b < 1024.0 * 1024.0 {
-        format!("{:.0} KB/s", b / 1024.0)
-    } else if b < 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.1} MB/s", b / 1024.0 / 1024.0)
-    } else {
-        format!("{:.2} GB/s", b / 1024.0 / 1024.0 / 1024.0)
+/// A unit symbol in the UI language ("GB", "ГБ", "Go"): the `[units]` table of the locale.
+pub fn unit(key: &str) -> String {
+    let full = format!("units.{key}");
+    let v = crate::i18n::t(&full);
+    if v != full {
+        return v;
     }
+    // no locale loaded (tests) or a missing key: the English unit
+    match key {
+        "b" => "B",
+        "kb" => "KB",
+        "mb" => "MB",
+        "gb" => "GB",
+        "tb" => "TB",
+        "per_s" => "/s",
+        "mbit" => "Mbit",
+        "gbit" => "Gbit",
+        "mhz" => "MHz",
+        "ghz" => "GHz",
+        "w" => "W",
+        "wh" => "Wh",
+        "rpm" => "RPM",
+        "ms" => "ms",
+        "h" => "h",
+        "min" => "min",
+        _ => key,
+    }
+    .to_string()
 }
 
+pub fn format_bytes_rate(bps: f64) -> String {
+    let b = bps.max(0.0);
+    let per = unit("per_s");
+    if b < 1024.0 {
+        format!("{:.0} {}{per}", b, unit("b"))
+    } else if b < 1024.0 * 1024.0 {
+        format!("{:.0} {}{per}", b / 1024.0, unit("kb"))
+    } else if b < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} {}{per}", b / 1024.0 / 1024.0, unit("mb"))
+    } else {
+        format!("{:.2} {}{per}", b / 1024.0 / 1024.0 / 1024.0, unit("gb"))
+    }
+}
 
 /// Metrics stay in bytes per second; only the network display converts to bits.
 pub fn format_net_rate(bytes_per_sec: f64, bits: bool) -> String {
@@ -220,20 +268,20 @@ pub fn format_bytes(b: u64) -> String {
     let f = b as f64;
     const K: f64 = 1024.0;
     if f < K * K {
-        format!("{:.0} KB", f / K)
+        format!("{:.0} {}", f / K, unit("kb"))
     } else if f < K * K * K {
-        format!("{:.0} MB", f / K / K)
+        format!("{:.0} {}", f / K / K, unit("mb"))
     } else if f < K * K * K * K {
-        format!("{:.1} GB", f / K / K / K)
+        format!("{:.1} {}", f / K / K / K, unit("gb"))
     } else {
-        format!("{:.2} TB", f / K / K / K / K)
+        format!("{:.2} {}", f / K / K / K / K, unit("tb"))
     }
 }
 
 pub fn format_duration(secs: u32) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
-    if h > 0 { format!("{h}h {m:02}m") } else { format!("{m} min") }
+    if h > 0 { format!("{h} {} {m:02} {}", unit("h"), unit("min")) } else { format!("{m} {}", unit("min")) }
 }
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -270,11 +318,11 @@ pub fn format_size(b: u64) -> String {
     let f = b as f64;
     const K: f64 = 1024.0;
     if f < K * K * K {
-        format!("{:.0} MB", f / K / K)
+        format!("{:.0} {}", f / K / K, unit("mb"))
     } else if f < K * K * K * K {
-        format!("{:.2} GB", f / K / K / K)
+        format!("{:.2} {}", f / K / K / K, unit("gb"))
     } else {
-        format!("{:.2} TB", f / K / K / K / K)
+        format!("{:.2} {}", f / K / K / K / K, unit("tb"))
     }
 }
 

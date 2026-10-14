@@ -68,6 +68,11 @@ pub struct Net {
     pub ifaces: Vec<NetIface>,
     /// aliases the user switched off
     pub disabled: Vec<String>,
+    /// IPv4 per LUID and Wi-Fi per GUID from the last background read, its time, and the read
+    /// under way (the WLAN calls take ~100 ms: never on the UI thread)
+    addr: (HashMap<u64, String>, HashMap<GUID, WifiInfo>),
+    addr_at: Option<Instant>,
+    addr_rx: Option<std::sync::mpsc::Receiver<(HashMap<u64, String>, HashMap<GUID, WifiInfo>)>>,
 }
 
 impl Net {
@@ -83,6 +88,9 @@ impl Net {
             iface_ip: String::new(),
             ifaces: Vec::new(),
             disabled: disabled.to_vec(),
+            addr: (HashMap::new(), HashMap::new()),
+            addr_at: None,
+            addr_rx: None,
         };
         n.update();
         n
@@ -235,9 +243,27 @@ impl Net {
 
     /// Resolve IPv4 of every interface, the Wi-Fi network names, and the busiest interface for
     /// the title (slower calls; popup only).
+    /// Addresses and Wi-Fi for the popup: read on a worker thread every few seconds, the last
+    /// result applied meanwhile.
     pub fn update_details(&mut self) {
-        let ips = ipv4_table();
-        let wifi = wifi_info();
+        if let Some(rx) = &self.addr_rx {
+            match rx.try_recv() {
+                Ok(v) => {
+                    self.addr = v;
+                    self.addr_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.addr_rx = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self.addr_rx.is_none() && self.addr_at.map_or(true, |t| t.elapsed().as_secs() >= 3) {
+            self.addr_at = Some(Instant::now());
+            let (tx, rx) = std::sync::mpsc::channel();
+            if std::thread::Builder::new().name("net-addr".into()).spawn(move || drop(tx.send((ipv4_table(), wifi_info())))).is_ok() {
+                self.addr_rx = Some(rx);
+            }
+        }
+        let (ips, wifi) = (&self.addr.0, &self.addr.1);
         for i in &mut self.ifaces {
             i.ip = ips.get(&i.luid).cloned().unwrap_or_default();
             let w = if i.kind == "Wi-Fi" { wifi.get(&i.guid).cloned().unwrap_or_default() } else { WifiInfo::default() };

@@ -22,6 +22,9 @@ pub struct AdapterInfo {
     pub load: Option<f32>,
     /// temperature, clocks, power; read for the primary adapter while the popup is open
     pub perf: super::gpuperf::Perf,
+    /// GPU memory in use on this adapter (popup only, GPU Adapter Memory counters), bytes
+    pub dedicated_used: Option<u64>,
+    pub shared_used: Option<u64>,
 }
 
 impl AdapterInfo {
@@ -44,8 +47,8 @@ pub struct Gpu {
     /// DXGI handle of each entry in `adapters`, for the VRAM usage of the primary one
     handles: Vec<Option<IDXGIAdapter3>>,
     primary: Option<usize>,
-    /// sensor source; None where the system has no D3DKMT perf data
-    sensors: Option<super::gpuperf::GpuPerf>,
+    /// sensor thread, started on the first GPU popup
+    worker: Option<SensorWorker>,
     pub name: String,
     pub vram_total: u64,
     pub vram_used: u64,
@@ -55,7 +58,7 @@ pub struct Gpu {
 
 impl Gpu {
    pub fn new(disabled: &[String]) -> Self {
-        let mut g = Self { handles: Vec::new(), primary: None, sensors: None, name: String::new(), vram_total: 0, vram_used: 0, vram_budget: 0, adapters: Vec::new() };
+        let mut g = Self { handles: Vec::new(), primary: None, worker: None, name: String::new(), vram_total: 0, vram_used: 0, vram_budget: 0, adapters: Vec::new() };
         unsafe {
             let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return g };
             let mut i = 0;
@@ -84,12 +87,12 @@ impl Gpu {
                     enabled: true,
                     load: None,
                     perf: Default::default(),
+                    dedicated_used: None,
+                    shared_used: None,
                 });
                 g.handles.push(a.cast::<IDXGIAdapter3>().ok());
             }
         }
-        let luids: Vec<u64> = g.adapters.iter().map(|a| a.luid).collect();
-        g.sensors = super::gpuperf::GpuPerf::new(&luids);
         g.set_disabled(disabled);
         g
     }
@@ -141,10 +144,39 @@ impl Gpu {
     }
 
     /// Sensors of the primary adapter (popup only: two kernel queries per call).
+    /// Memory in use per adapter from the GPU Adapter Memory counters (by LUID).
+    pub fn set_adapter_mem(&mut self, mem: &std::collections::HashMap<u64, (u64, u64)>) {
+        for a in self.adapters.iter_mut() {
+            let m = mem.get(&a.luid);
+            a.dedicated_used = m.map(|m| m.0);
+            a.shared_used = m.map(|m| m.1);
+        }
+    }
+
+    /// Sensors of the primary adapter, read on the sensor thread (the vendor libraries and a
+    /// sleeping Optimus GPU take hundreds of ms per read): asks for a fresh reading and takes the
+    /// last one. GPU popup only; `stop_perf` lets the thread sleep again.
     pub fn update_perf(&mut self) {
-        let (Some(t), Some(i)) = (&self.sensors, self.primary) else { return };
-        let a = &mut self.adapters[i];
-        a.perf = t.read(a.luid);
+        let Some(i) = self.primary else { return };
+        let a = &self.adapters[i];
+        let target = Target { luid: a.luid, vendor_id: a.vendor_id, name: a.name.clone() };
+        let luids: Vec<u64> = self.adapters.iter().map(|a| a.luid).collect();
+        let worker = self.worker.get_or_insert_with(|| SensorWorker::start(luids));
+        let (m, cv) = &*worker.st;
+        let mut st = m.lock().unwrap();
+        if st.want.as_ref() != Some(&target) {
+            st.want = Some(target.clone());
+            cv.notify_all();
+        }
+        let perf = st.result.filter(|r| r.0 == target.luid).map(|r| r.1).unwrap_or_default();
+        drop(st);
+        self.adapters[i].perf = perf;
+    }
+
+    pub fn stop_perf(&mut self) {
+        if let Some(w) = &self.worker {
+            w.st.0.lock().unwrap().want = None;
+        }
     }
 
     pub fn update(&mut self) {
@@ -154,5 +186,77 @@ impl Gpu {
             self.vram_used = info.CurrentUsage;
             self.vram_budget = info.Budget;
         }
+    }
+}
+
+/// The adapter the sensor thread reads.
+#[derive(Clone, PartialEq)]
+struct Target {
+    luid: u64,
+    vendor_id: u32,
+    name: String,
+}
+
+#[derive(Default)]
+struct SensorState {
+    /// what to read; None: sleep
+    want: Option<Target>,
+    /// LUID and the last reading
+    result: Option<(u64, super::gpuperf::Perf)>,
+}
+
+struct SensorWorker {
+    st: std::sync::Arc<(std::sync::Mutex<SensorState>, std::sync::Condvar)>,
+}
+
+impl SensorWorker {
+    fn start(luids: Vec<u64>) -> Self {
+        let st = std::sync::Arc::new((std::sync::Mutex::new(SensorState::default()), std::sync::Condvar::new()));
+        let shared = st.clone();
+        let _ = std::thread::Builder::new().name("gpu-sensors".into()).spawn(move || sensor_loop(shared, luids));
+        Self { st }
+    }
+}
+
+/// D3DKMT for every vendor, then the vendor library on top; one reading a second while wanted.
+/// The libraries are loaded here on first use and stay on this thread.
+fn sensor_loop(st: std::sync::Arc<(std::sync::Mutex<SensorState>, std::sync::Condvar)>, luids: Vec<u64>) {
+    // WINSTATS_WIN7_GPU: no D3DKMT perf data, as on Windows 7 (testing)
+    let mut sensors = if std::env::var_os("WINSTATS_WIN7_GPU").is_some() { None } else { super::gpuperf::GpuPerf::new(&luids) };
+    let mut nvidia: Option<Option<super::nvidia::Nvidia>> = None;
+    let mut intel: Option<Option<super::intel::Intel>> = None;
+    let mut amd: Option<Option<super::amd::Amd>> = None;
+    let (m, cv) = &*st;
+    loop {
+        let target = {
+            let mut s = m.lock().unwrap();
+            while s.want.is_none() {
+                s = cv.wait(s).unwrap();
+            }
+            s.want.clone().unwrap()
+        };
+        let luid = target.luid;
+        let mut perf = sensors.as_mut().map(|t| t.read(luid)).unwrap_or_default();
+        let bus = sensors.as_ref().and_then(|t| t.bus(luid));
+        if target.vendor_id == 0x10DE {
+            if let Some(nv) = nvidia.get_or_insert_with(|| Some(super::nvidia::Nvidia::new())) {
+                nv.fill(bus, &target.name, &mut perf);
+            }
+        }
+        if target.vendor_id == 0x1002 {
+            if let Some(a) = amd.get_or_insert_with(super::amd::Amd::new).as_ref() {
+                a.fill(bus, &mut perf);
+            }
+        }
+        if target.vendor_id == 0x8086 {
+            if let Some(i) = intel.get_or_insert_with(super::intel::Intel::new).as_mut() {
+                i.fill(luid, &mut perf);
+            }
+        }
+        let s = m.lock().unwrap();
+        let mut s = s;
+        s.result = Some((luid, perf));
+        // next reading in a second, or at once when the adapter changes
+        let _ = cv.wait_timeout_while(s, std::time::Duration::from_secs(1), |s| s.want.as_ref() == Some(&target)).unwrap();
     }
 }

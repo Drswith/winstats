@@ -284,7 +284,7 @@ impl Agent {
             .disks
             .iter()
             .enumerate()
-            .map(|(i, x)| PhysicalDisk { index: i as u32, model: x.model.clone(), bus: bus_static(&x.bus), size: x.size, read_bps: 0.0, write_bps: 0.0, enabled: !self.disks_disabled.contains(&x.model) })
+            .map(|(i, x)| PhysicalDisk { index: i as u32, model: x.model.clone(), bus: bus_static(&x.bus), size: x.size, read_bps: 0.0, write_bps: 0.0, enabled: !self.disks_disabled.contains(&x.model), ..Default::default() })
             .collect();
         d.net_ifaces = info
             .ifaces
@@ -425,7 +425,7 @@ impl Agent {
 
     fn apply_details(&mut self, det: Details) {
         let d = &mut self.data;
-        let conv = |v: &[ProcSample]| -> Vec<ProcInfo> { v.iter().map(|p| ProcInfo { pid: p.pid, name: p.name.clone(), cpu: p.cpu, mem: p.mem, io: p.io }).collect() };
+        let conv = |v: &[ProcSample]| -> Vec<ProcInfo> { v.iter().map(|p| ProcInfo { pid: p.pid, name: p.name.clone(), cpu: p.cpu, mem: p.mem, io: p.io, gpu: 0.0, vram: 0, system: false }).collect() };
         d.top_cpu = conv(&det.top_cpu);
         d.top_mem = conv(&det.top_mem);
         d.top_io = conv(&det.top_io);

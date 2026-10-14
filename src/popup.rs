@@ -3,7 +3,7 @@
 
 use crate::canvas::{Canvas, Color, FW_NORMAL, FW_SEMIBOLD, FontSpec, GREEN, RED, YELLOW};
 use crate::metrics::MetricsData;
-use crate::util::{format_bytes, format_bytes_rate, format_duration, format_net_rate, pcwstr, wide};
+use crate::util::{format_bytes, format_bytes_rate, format_duration, format_net_rate, pcwstr, unit, wide};
 use crate::i18n::{t, tf};
 use crate::widgets::{Kind, Theme};
 use std::time::Instant;
@@ -44,7 +44,7 @@ pub enum Action {
     /// include / exclude a physical disk (by model)
     ToggleDisk(String),
     /// a video adapter row: count it in the GPU load or not (by adapter name)
-    ToggleGpu(String),
+    SelectGpu(String),
     /// pin a process row (its icon becomes a kill button); the index is the row in the list
     LockProc(usize, crate::metrics::processes::ProcInfo),
     /// terminate the process
@@ -53,6 +53,10 @@ pub enum Action {
     ToggleNetSeries(bool),
     /// put the text on the clipboard (IP, MAC)
     Copy(String),
+    /// open / close an expandable block (CPU instruction list, disk details) by key
+    Expand(String),
+    /// SYS (true) / USER (false) filter button of the process lists
+    ProcFilter(bool),
 }
 
 /// A clickable row rectangle, in content coords.
@@ -96,6 +100,10 @@ pub struct Popup {
     copied: Option<(String, Instant)>,
     /// pinned process rows
     locks: Vec<Lock>,
+    /// expandable blocks the user opened ("cpu_features", "disk:<model>")
+    expanded: std::collections::HashSet<String>,
+    /// SYS / USER filter of the process lists, as configured (drawn on the section header)
+    pub proc_filter: (bool, bool),
     /// the process list as shown when the mouse entered it: rows keep their places while the
     /// mouse is over the list so a click lands on the row that was aimed at
     frozen: Option<Vec<crate::metrics::processes::ProcInfo>>,
@@ -216,6 +224,8 @@ impl Popup {
             hits: Vec::new(),
             copied: None,
             locks: Vec::new(),
+            expanded: Default::default(),
+            proc_filter: (true, true),
             frozen: None,
             hit_hover: None,
             mouse: None,
@@ -309,6 +319,13 @@ impl Popup {
         } else {
             self.locks.retain(|l| l.snap.pid != p.pid);
             self.locks.push(Lock { row, snap: p });
+        }
+    }
+
+    /// Open or close an expandable block.
+    pub fn toggle_expand(&mut self, key: String) {
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
         }
     }
 
@@ -476,7 +493,7 @@ impl Popup {
         self.content.resize(w - pad * 2, t.s(900.0));
         self.content.clear();
         let copied = self.copy_progress();
-        let mut ui = Ui { c: &mut self.content, t, w: w - pad * 2, y: 0, hover: self.hover, pie: None, tips: Vec::new(), hits: Vec::new(), icons: &mut self.icons, indent: 0, locks: &mut self.locks, frozen: &mut self.frozen, mouse: self.mouse, copied };
+        let mut ui = Ui { c: &mut self.content, t, w: w - pad * 2, y: 0, hover: self.hover, pie: None, tips: Vec::new(), hits: Vec::new(), icons: &mut self.icons, indent: 0, locks: &mut self.locks, frozen: &mut self.frozen, expanded: &self.expanded, proc_filter: self.proc_filter, mouse: self.mouse, copied };
         match kind {
             Kind::Cpu => draw_cpu(&mut ui, m),
             Kind::Mem => draw_mem(&mut ui, m),
@@ -599,6 +616,8 @@ struct Ui<'a> {
     indent: i32,
     locks: &'a mut Vec<Lock>,
     frozen: &'a mut Option<Vec<crate::metrics::processes::ProcInfo>>,
+    expanded: &'a std::collections::HashSet<String>,
+    proc_filter: (bool, bool),
     /// mouse position in content coords, when over the popup
     mouse: Option<(i32, i32)>,
     /// text just copied and the flash progress 0..1
@@ -645,6 +664,67 @@ impl Ui<'_> {
             self.y += h;
         }
         self.space(10.0);
+    }
+
+    /// Title with a list of small lines under it instead of one subtitle: (left, right, left
+    /// colour, click action). `right` goes on the title line.
+    fn title_list(&mut self, title: &str, right: &str, lines: &[(String, String, Color, Option<Action>)]) {
+        let f = self.font(15.0, FW_SEMIBOLD);
+        let (_, h) = self.c.draw_text(title, 0, self.y, f, self.t.text);
+        if !right.is_empty() {
+            // bottom-aligned with the title, in the subtitle font
+            let fs = self.font(9.5, FW_NORMAL);
+            let (rw, rh) = self.c.measure_text(right, fs);
+            self.c.draw_text(right, self.w - rw, self.y + h - rh - self.t.s(2.0), fs, self.t.dim);
+        }
+        self.y += h;
+        let f = self.font(9.5, FW_NORMAL);
+        for (left, value, color, action) in lines {
+            let (vw, lh) = self.c.measure_text(value, f);
+            let lh = if value.is_empty() { self.c.measure_text(left, f).1 } else { lh };
+            let start = self.y;
+            self.clipped(left, 0, self.y, self.w - vw - self.t.s(8.0), f, *color);
+            self.c.draw_text(value, self.w - vw, self.y, f, *color);
+            self.y += lh + self.t.s(1.0);
+            if let Some(a) = action {
+                self.clickable(start, a.clone());
+            }
+        }
+        self.space(9.0);
+    }
+
+    /// Process section header: the title, and for the local machine the SYS / USER filter
+    /// buttons on the right (filled when on).
+    fn proc_section(&mut self, name: &str, local: bool) {
+        if !local {
+            self.section(name);
+            self.space(4.0);
+            return;
+        }
+        self.space(8.0);
+        let f = self.font(9.5, FW_SEMIBOLD);
+        let (_, h) = self.c.draw_text(&name.to_uppercase(), 0, self.y, f, self.t.dim);
+        let fb = self.font(8.5, FW_SEMIBOLD);
+        let (pad_x, gap) = (self.t.s(6.0), self.t.s(4.0));
+        let bh = h + self.t.s(2.0);
+        let by = self.y - self.t.s(1.0);
+        let mut x = self.w;
+        for (label, on, system) in [("USER", self.proc_filter.1, false), ("SYS", self.proc_filter.0, true)] {
+            let (tw, th) = self.c.measure_text(label, fb);
+            let bw = tw + pad_x * 2;
+            x -= bw;
+            let r = self.t.s(2.5) as f32;
+            if on {
+                self.c.fill_round_rect(x, by, bw, bh, r, self.t.text.alpha(0.16));
+            } else {
+                self.c.stroke_round_rect_r(x, by, bw, bh, r, self.t.dim.alpha(0.5));
+            }
+            let col = if on { self.t.text } else { self.t.dim.alpha(0.7) };
+            self.c.draw_text(label, x + pad_x, by + (bh - th) / 2, fb, col);
+            self.hits.push(Hit { x, y: by, w: bw, h: bh, action: Action::ProcFilter(system) });
+            x -= gap;
+        }
+        self.y += h + self.t.s(8.0);
     }
 
     fn section(&mut self, name: &str) {
@@ -729,6 +809,57 @@ impl Ui<'_> {
             }
         }
         self.y += h + self.t.s(3.0);
+    }
+
+    /// Dim text word-wrapped to the popup width, indented like a sub-row.
+    fn wrapped(&mut self, text: &str, color: Color) {
+        let f = self.font(10.0, FW_NORMAL);
+        let x0 = self.t.s(12.0);
+        let max_w = self.w - x0;
+        let h = self.c.measure_text("X", f).1;
+        let mut line = String::new();
+        for word in text.split(' ') {
+            let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+            if line.is_empty() || self.c.measure_text(&candidate, f).0 <= max_w {
+                line = candidate;
+            } else {
+                self.c.draw_text(&line, x0, self.y, f, color);
+                self.y += h + self.t.s(1.0);
+                line = word.to_string();
+            }
+        }
+        if !line.is_empty() {
+            self.c.draw_text(&line, x0, self.y, f, color);
+            self.y += h + self.t.s(1.0);
+        }
+        self.space(3.0);
+    }
+
+    /// The "More" / "Less" line (with a chevron) under a list whose rarely needed rows fold away; `key` is
+    /// the expand key (kept in the config, so the choice survives).
+    fn more_toggle(&mut self, key: &str, open: bool) {
+        let f = self.font(9.5, FW_NORMAL);
+        let text = if open { t("popup.less") } else { t("popup.more") };
+        let start = self.y;
+        // right-aligned: the text, then a drawn chevron (the font's triangles are too small)
+        let (cw, ch) = (self.t.s(7.0) as f32, self.t.s(3.5) as f32);
+        let (tw, h) = self.c.measure_text(&text, f);
+        let tx = self.w - tw - self.t.s(5.0) - cw as i32;
+        self.c.draw_text(&text, tx, self.y, f, self.t.dim);
+        let cx = (self.w - cw as i32) as f32;
+        let cy = self.y as f32 + h as f32 / 2.0 + 1.0;
+        let (top, tip) = if open { (cy + ch / 2.0, cy - ch / 2.0) } else { (cy - ch / 2.0, cy + ch / 2.0) };
+        let width = self.t.s(1.2) as f32;
+        self.c.draw_line(cx, top, cx + cw / 2.0, tip, width, self.t.dim);
+        self.c.draw_line(cx + cw / 2.0, tip, cx + cw, top, width, self.t.dim);
+        self.y += h + self.t.s(3.0);
+        self.clickable(start, Action::Expand(key.to_string()));
+    }
+
+    /// Hovering the rows drawn since `from_y` shows `text` as a tooltip.
+    fn hover_tip(&mut self, from_y: i32, text: String) {
+        let font = self.font(9.5, FW_NORMAL);
+        self.tips.push(Tip { x: 0, y: from_y, w: self.w, h: self.y - from_y, font, text });
     }
 
     /// Make the rows drawn since `from_y` react to a click.
@@ -1025,6 +1156,8 @@ impl Ui<'_> {
                 ProcMode::Cpu => format!("{:.1}%", p.cpu * 100.0),
                 ProcMode::Mem => format_bytes(p.mem),
                 ProcMode::Io => format_bytes_rate(p.io),
+                ProcMode::Gpu if p.vram > 0 => format!("{} · {}", pct(p.gpu), format_bytes(p.vram)),
+                ProcMode::Gpu => pct(p.gpu),
             };
             // a 32-bit process on 64-bit Windows is marked; local only (agents do not report it)
             let tag = if local && self.icons.is_32bit(p.pid) { Some(t("popup.bits32")) } else { None };
@@ -1046,6 +1179,8 @@ enum ProcMode {
     Cpu,
     Mem,
     Io,
+    /// GPU load and GPU memory
+    Gpu,
 }
 
 fn lighten(c: Color) -> Color {
@@ -1062,12 +1197,12 @@ fn link_speed(bps: u64) -> String {
     let g = bps as f64 / 1e9;
     if g >= 1.0 {
         if (g - g.round()).abs() < 0.05 {
-            format!("{} Gbit/s", g.round())
+            format!("{} {}{}", g.round(), unit("gbit"), unit("per_s"))
         } else {
-            format!("{g:.1} Gbit/s")
+            format!("{g:.1} {}{}", unit("gbit"), unit("per_s"))
         }
     } else if bps >= 1_000_000 {
-        format!("{} Mbit/s", bps / 1_000_000)
+        format!("{} {}{}", bps / 1_000_000, unit("mbit"), unit("per_s"))
     } else {
         format!("{} kbit/s", bps / 1000)
     }
@@ -1082,9 +1217,32 @@ fn pct(v: f32) -> String {
 /// "3.9 GHz" or "800 MHz".
 fn clock_text(mhz: u32) -> String {
     if mhz >= 1000 {
-        format!("{:.1} GHz", mhz as f64 / 1000.0)
+        format!("{:.1} {}", mhz as f64 / 1000.0, unit("ghz"))
     } else {
-        format!("{mhz} MHz")
+        format!("{mhz} {}", unit("mhz"))
+    }
+}
+
+/// "12 345" with thin grouping, for counts and rates.
+fn grouped(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push('\u{2009}');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// "3 d 04:12" / "04:12" (hours:minutes).
+fn uptime_text(secs: u64) -> String {
+    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
+    if d > 0 {
+        format!("{} {h:02}:{m:02}", tf("popup.days", &[("n", &d.to_string())]))
+    } else {
+        format!("{h:02}:{m:02}")
     }
 }
 
@@ -1118,27 +1276,30 @@ fn sub(m: &MetricsData, s: &str) -> String {
 }
 
 fn draw_cpu(ui: &mut Ui, m: &MetricsData) {
-    let mut line = m.cpu_name.clone();
-    if let Some(c) = m.cpu_temp {
-        if !line.is_empty() {
-            line.push_str(" · ");
-        }
-        line.push_str(&format!("{c:.0} \u{00B0}C"));
+    // the name on the left, the temperature (where known) on the right
+    let temp = m.cpu_temp.map(|c| format!("{c:.0} \u{00B0}C")).unwrap_or_default();
+    if m.cpu_socket_names.len() > 1 && !m.offline {
+        // several physical processors: each one under the title with its own load
+        let lines: Vec<(String, String, Color, Option<Action>)> = m
+            .cpu_socket_names
+            .iter()
+            .enumerate()
+            .map(|(p, name)| {
+                let loads: Vec<f32> = m.cpu_cores.iter().zip(&m.cpu_packages).filter(|(_, &k)| k as usize == p).map(|(v, _)| *v).collect();
+                let load = if loads.is_empty() { String::new() } else { pct(loads.iter().sum::<f32>() / loads.len() as f32) };
+                (name.clone(), load, ui.t.dim, None)
+            })
+            .collect();
+        ui.title_list(&head(m, "popup.cpus"), &temp, &lines);
+    } else {
+        ui.title_r(&head(m, "popup.cpu"), &sub(m, &m.cpu_name), &temp);
     }
-    ui.title(&head(m, "popup.cpu"), &sub(m, &line));
     let hist: Vec<f32> = m.cpu_history.iter().cloned().collect();
     ui.chart(&hist, 70.0, ui.t.accent);
     ui.row_colored(&t("popup.load"), &pct(m.cpu_total), ui.t.usage(m.cpu_total, ui.t.text));
-    ui.row(&t("popup.system"), &pct(m.cpu_system));
-    ui.row(&t("popup.user"), &pct(m.cpu_user));
-    ui.row(&t("popup.idle"), &pct((1.0 - m.cpu_total).max(0.0)));
-    if m.load_avg.len() == 3 {
-        ui.row(&t("popup.load_avg"), &format!("{:.2} / {:.2} / {:.2}", m.load_avg[0], m.load_avg[1], m.load_avg[2]));
-    }
-    if m.cpu_sockets > 1 {
-        ui.row(&t("popup.sockets"), &m.cpu_sockets.to_string());
-    }
-    let sockets = if m.cpu_sockets > 1 { tf("popup.sockets_suffix", &[("n", &m.cpu_sockets.to_string())]) } else { String::new() };
+    // kernel / programs in one line: who is busy
+    ui.row(&format!("{} / {}", t("popup.system"), t("popup.user")), &format!("{} / {}", pct(m.cpu_system), pct(m.cpu_user)));
+    let x = &m.sys;
     if m.cpu_hybrid() {
         // load and current clock per core class
         let (pn, en, pl, el) = m.cpu_pe();
@@ -1146,16 +1307,80 @@ fn draw_cpu(ui: &mut Ui, m: &MetricsData) {
         let low = m.cpu_classes.iter().cloned().min().unwrap_or(0);
         ui.row(&tf("popup.p_cores", &[("n", &pn.to_string())]), &with_clock(pct(pl), m.cpu_clock(Some(top))));
         ui.row(&tf("popup.e_cores", &[("n", &en.to_string())]), &with_clock(pct(el), m.cpu_clock(Some(low))));
+    } else if let Some(mhz) = m.cpu_clock(None) {
+        ui.row(&t("popup.clock"), &clock_text(mhz));
+    }
+    // held back by heat, power or firmware limits (shown only while it bites)
+    if let Some(v) = x.perf_limit.filter(|v| *v < 0.995) {
+        ui.row_colored(&t("popup.perf_limit"), &pct(v), RED);
+    }
+    if x.processes > 0 {
+        ui.row(&t("popup.procs_threads"), &format!("{} / {}", grouped(x.processes as u64), grouped(x.threads as u64)));
+    }
+    if m.load_avg.len() == 3 {
+        ui.row(&t("popup.load_avg"), &format!("{:.2} / {:.2} / {:.2}", m.load_avg[0], m.load_avg[1], m.load_avg[2]));
+    }
+    // diagnostics and fixed facts fold away under "More"
+    let more = ui.expanded.contains("more:cpu");
+    if more {
+        ui.row(&t("popup.idle"), &pct((1.0 - m.cpu_total).max(0.0)));
+        if x.processes > 0 {
+            ui.row(&t("popup.handles"), &grouped(x.handles as u64));
+        }
+        if x.uptime_secs > 0 {
+            ui.row(&t("popup.uptime"), &uptime_text(x.uptime_secs));
+        }
+        if let Some(v) = x.ctx_switches {
+            ui.row(&t("popup.ctx_switches"), &format!("{}{}", grouped(v.round() as u64), unit("per_s")));
+        }
+        if let Some(v) = x.interrupts {
+            let mut text = format!("{}{}", grouped(v.round() as u64), unit("per_s"));
+            if let (Some(dpc), Some(irq)) = (x.dpc_time, x.interrupt_time) {
+                text.push_str(&format!(" · DPC {:.1}% · ISR {:.1}%", dpc * 100.0, irq * 100.0));
+            }
+            ui.row(&t("popup.interrupts"), &text);
+        }
+        if m.cpu_sockets > 1 {
+            ui.row(&t("popup.sockets"), &m.cpu_sockets.to_string());
+        }
+        let c = &m.sys.cpu;
+        if c.cache.iter().any(|v| *v > 0) {
+            let size = |v: u64| if v > 0 { format_bytes(v) } else { "-".to_string() };
+            ui.row(&t("popup.cache"), &format!("{} / {} / {}", size(c.cache[0]), size(c.cache[1]), size(c.cache[2])));
+        }
+        match (c.base_mhz, c.max_mhz) {
+            (Some(b), Some(x)) if x > b => ui.row(&t("popup.base_max_clock"), &format!("{} / {}", clock_text(b), clock_text(x))),
+            (Some(b), _) => ui.row(&t("popup.base_clock"), &clock_text(b)),
+            _ => {}
+        }
+        if !c.features.is_empty() {
+            // a click opens the full list of extensions the CPU reports
+            let start = ui.y;
+            ui.row(&t("popup.instructions"), &c.features);
+            let open = ui.expanded.contains("cpu_features");
+            if open && !c.all_features.is_empty() {
+                ui.wrapped(&c.all_features, ui.t.dim);
+            }
+            ui.clickable(start, Action::Expand("cpu_features".to_string()));
+        }
+        // under a hypervisor (Hyper-V, VBS) Windows reports the firmware switch as off
+        if c.hypervisor {
+            ui.row(&t("popup.virtualization"), &t("popup.hypervisor"));
+        } else if let Some(v) = c.virtualization {
+            ui.row(&t("popup.virtualization"), &t(if v { "popup.enabled" } else { "popup.disabled" }));
+        }
+    }
+    ui.more_toggle("more:cpu", more);
+    let sockets = if m.cpu_sockets > 1 { tf("popup.sockets_suffix", &[("n", &m.cpu_sockets.to_string())]) } else { String::new() };
+    if m.cpu_hybrid() {
+        let (pn, en, _, _) = m.cpu_pe();
         ui.section(&tf("popup.cores_pe", &[("p", &pn.to_string()), ("e", &en.to_string()), ("sockets", &sockets)]));
     } else {
-        if let Some(mhz) = m.cpu_clock(None) {
-            ui.row(&t("popup.clock"), &clock_text(mhz));
-        }
         ui.section(&tf("popup.cores", &[("n", &m.cpu_cores.len().to_string()), ("sockets", &sockets)]));
     }
     let breaks = m.cpu_breaks();
     ui.cores(&m.cpu_cores, &m.cpu_classes, &breaks, &m.cpu_smt, &m.cpu_ids);
-    ui.section(&t("popup.top_processes"));
+    ui.proc_section(&t("popup.top_processes"), m.host.is_empty());
     ui.processes(&m.top_cpu, ProcMode::Cpu, m.top_n, m.host.is_empty());
 }
 
@@ -1175,6 +1400,12 @@ fn draw_mem(ui: &mut Ui, m: &MetricsData) {
     ui.row(&t("popup.used"), &format_bytes(m.mem.used));
     ui.row(&t("popup.free"), &format_bytes(m.mem.total.saturating_sub(m.mem.used)));
     ui.row(&t("popup.committed"), &format!("{} / {}", format_bytes(m.mem.commit_used), format_bytes(m.mem.commit_total)));
+    if m.sys.pagefile_total > 0 {
+        ui.row(&t("popup.pagefile"), &format!("{} / {}", format_bytes(m.sys.pagefile_used), format_bytes(m.sys.pagefile_total)));
+    }
+    if m.sys.hw_reserved >= 1024 * 1024 {
+        ui.row(&t("popup.hw_reserved"), &format_bytes(m.sys.hw_reserved));
+    }
     if m.mem_processes > 0 {
         // where the physical memory goes: process private sets, kernel pools, the rest of "used"
         // (driver-locked pages such as VM memory, shared/mapped pages, hardware reserved) and
@@ -1191,72 +1422,139 @@ fn draw_mem(ui: &mut Ui, m: &MetricsData) {
         ]);
         ui.row(&t("popup.file_cache"), &format_bytes(m.mem_cache));
     }
-    ui.section(&t("popup.top_processes"));
+    ui.proc_section(&t("popup.top_processes"), m.host.is_empty());
     ui.processes(&m.top_mem, ProcMode::Mem, m.top_n, m.host.is_empty());
 }
 
 fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
-    // like the CPU popup: the temperature after the name, only when the driver reports it
-    let mut line = m.gpu_name.clone();
-    if let Some(c) = m.gpu_perf.temp {
-        if !line.is_empty() {
-            line.push_str(" · ");
-        }
-        line.push_str(&format!("{c:.0} \u{00B0}C"));
+    let temp = m.gpu_perf.temp.map(|c| format!("{c:.0} \u{00B0}")).unwrap_or_default();
+    if m.gpu_adapters.is_empty() || m.offline {
+        ui.title_r(&head(m, "popup.gpu"), &sub(m, &m.gpu_name), &temp);
+    } else {
+        // every adapter under the title, the temperature on the right (the sensors are read for
+        // the shown one only, an iGPU has none worth showing); the shown one is bright, a click
+        // switches the popup and the widget to another
+        let primary = m.gpu_primary.as_ref().map(|p| p.luid);
+        let several = m.gpu_adapters.len() > 1 && m.host.is_empty();
+        let lines: Vec<(String, String, Color, Option<Action>)> = m
+            .gpu_adapters
+            .iter()
+            .map(|a| {
+                let shown = Some(a.luid) == primary;
+                let right = if shown && a.dedicated >= 512 * 1024 * 1024 { temp.clone() } else { String::new() };
+                let color = if shown { ui.t.text } else { ui.t.dim };
+                let action = (several && !shown).then(|| Action::SelectGpu(a.name.clone()));
+                (a.name.clone(), right, color, action)
+            })
+            .collect();
+        let key = if m.gpu_adapters.len() > 1 { "popup.gpus" } else { "popup.gpu" };
+        ui.title_list(&head(m, key), "", &lines);
     }
-    ui.title(&head(m, "popup.gpu"), &sub(m, &line));
     let hist: Vec<f32> = m.gpu_history.iter().cloned().collect();
     ui.chart(&hist, 70.0, ui.t.accent);
     match m.gpu {
         Some(v) => ui.row_colored(&t("popup.load"), &pct(v), ui.t.usage(v, ui.t.text)),
         None => ui.row(&t("popup.load"), &t("popup.na")),
     }
+    // memory of the primary adapter in use: "1.2 / 5.9 GB · shared 0.4 GB"
+    let primary = m.gpu_primary.as_ref().and_then(|p| m.gpu_adapters.iter().find(|a| a.luid == p.luid));
+    let adapter_mem = primary.map(adapter_mem).unwrap_or_default();
+    if !adapter_mem.is_empty() {
+        ui.row(&t("popup.video_memory"), &adapter_mem);
+    }
     // whatever the driver reports (D3DKMT perf data); missing ones are left out
     let p = m.gpu_perf;
     if let Some(mhz) = p.core_mhz {
-        ui.row(&t("popup.clock"), &format!("{mhz} MHz"));
+        ui.row(&t("popup.clock"), &format!("{mhz} {}", unit("mhz")));
     }
-    if let Some(mhz) = p.mem_mhz {
-        ui.row(&t("popup.mem_clock"), &format!("{mhz} MHz"));
+    match (p.power_w, p.power_limit_w, p.power) {
+        (Some(w), Some(l), _) => ui.row(&t("popup.power"), &format!("{w:.0} / {l:.0} {}", unit("w"))),
+        (Some(w), None, _) => ui.row(&t("popup.power"), &format!("{w:.0} {}", unit("w"))),
+        (None, _, Some(v)) => ui.row(&t("popup.power"), &tf("popup.power_budget", &[("pct", &pct(v))])),
+        _ => {}
     }
-    if let Some(v) = p.power {
-        ui.row(&t("popup.power"), &tf("popup.power_budget", &[("pct", &pct(v))]));
+    if let Some(h) = p.hotspot {
+        // the hottest point of the die; the tooltip says what the gap to the core reading means
+        let start = ui.y;
+        ui.row(&t("popup.hotspot"), &format!("{h:.0} \u{00B0}C"));
+        ui.hover_tip(start, t("popup.hotspot_tip"));
     }
-    if m.vram_budget > 0 {
-        let frac = m.vram_used as f32 / m.vram_budget as f32;
-        ui.section(&t("popup.video_memory"));
-        ui.bar_row(&t("popup.used"), frac, &format_bytes(m.vram_used), ui.t.accent);
-        ui.row(&t("popup.budget"), &format_bytes(m.vram_budget));
-    }
-    if m.vram_total > 0 {
-        ui.row(&t("popup.dedicated"), &format_bytes(m.vram_total));
-    }
-    if let Some(a) = &m.gpu_primary {
-        ui.section(&t("popup.adapter"));
-        let vendor = a.vendor();
-        let ids = format!("{:04X}:{:04X}", a.vendor_id, a.device_id);
-        ui.row(&t("popup.vendor_device"), &if vendor.is_empty() { ids } else { format!("{vendor} {ids}") });
-        if !a.driver.is_empty() {
-            ui.row(&t("popup.driver"), &a.driver);
+    // the rest folds away under "More"
+    let more = ui.expanded.contains("more:gpu");
+    if more {
+        if let Some(mhz) = p.mem_mhz {
+            ui.row(&t("popup.mem_clock"), &format!("{mhz} {}", unit("mhz")));
         }
-    }
-    if m.gpu_adapters.len() > 1 {
-        ui.section(&t("popup.all_adapters"));
-        for a in &m.gpu_adapters {
-            // "12% · 5.9 GB"; a click counts the adapter in the load or leaves it out
-            let mut parts: Vec<String> = Vec::new();
-            if let (Some(v), true) = (a.load, m.gpu_available) {
-                parts.push(pct(v));
-            }
-            parts.push(if a.dedicated > 0 { format_bytes(a.dedicated) } else { t("popup.shared") });
-            let value = parts.join(" · ");
-            let start = ui.y;
-            ui.row_lv(&a.name, &value, ui.on_off(ui.t.text, a.enabled), ui.on_off(ui.t.dim, a.enabled));
-            if m.host.is_empty() {
-                ui.clickable(start, Action::ToggleGpu(a.name.clone()));
+        match (p.fan_pct, p.fan_rpm) {
+            (Some(f), Some(r)) => ui.row(&t("popup.fan"), &format!("{f}% · {r} {}", unit("rpm"))),
+            (Some(f), None) => ui.row(&t("popup.fan"), &format!("{f}%")),
+            (None, Some(r)) => ui.row(&t("popup.fan"), &format!("{r} {}", unit("rpm"))),
+            _ => {}
+        }
+        // "PCIe 3.0 x16 (max 3.0 x16) · 1.2 GB/s"
+        let mut link = String::new();
+        if let (Some(g), Some(w)) = (p.pcie_gen, p.pcie_width) {
+            link = format!("{}.0 x{w}", g);
+            if let (Some(mg), Some(mw)) = (p.pcie_max_gen, p.pcie_max_width) {
+                if (mg, mw) != (g, w) {
+                    link.push_str(&format!(" ({})", tf("popup.max", &[("v", &format!("{mg}.0 x{mw}"))])));
+                }
             }
         }
+        if let Some(bw) = p.pcie_bw {
+            if !link.is_empty() {
+                link.push_str(" · ");
+            }
+            link.push_str(&format_bytes_rate(bw));
+        }
+        if !link.is_empty() {
+            ui.row("PCIe", &link);
+        }
+        if let Some(bw) = p.mem_bw {
+            ui.row(&t("popup.mem_bandwidth"), &format_bytes_rate(bw));
+        }
+        if let Some(a) = &m.gpu_primary {
+            let vendor = a.vendor();
+            let ids = format!("{:04X}:{:04X}", a.vendor_id, a.device_id);
+            ui.row(&t("popup.vendor_device"), &if vendor.is_empty() { ids } else { format!("{vendor} {ids}") });
+            if !a.driver.is_empty() {
+                ui.row(&t("popup.driver"), &a.driver);
+            }
+        }
     }
+    ui.more_toggle("more:gpu", more);
+    // DXGI usage is this process's own; the adapter counters above replace it locally
+    if adapter_mem.is_empty() {
+        if m.vram_budget > 0 {
+            let frac = m.vram_used as f32 / m.vram_budget as f32;
+            ui.section(&t("popup.video_memory"));
+            ui.bar_row(&t("popup.used"), frac, &format_bytes(m.vram_used), ui.t.accent);
+            ui.row(&t("popup.budget"), &format_bytes(m.vram_budget));
+        }
+        if m.vram_total > 0 {
+            ui.row(&t("popup.dedicated"), &format_bytes(m.vram_total));
+        }
+    }
+    // per-process GPU use: local only, and only where the GPU counters exist (Windows 10 1709+)
+    if m.host.is_empty() && m.gpu_available {
+        ui.proc_section(&t("popup.gpu_processes"), true);
+        ui.processes(&m.top_gpu, ProcMode::Gpu, m.top_n, true);
+    }
+}
+
+/// Adapter memory in use where the counters have it: "1.2 / 5.9 GB · shared 0.4 GB"; an iGPU's
+/// small dedicated carve-out stays empty, only its shared use is shown then. "" when unknown.
+fn adapter_mem(a: &crate::metrics::gpu::AdapterInfo) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match (a.dedicated > 0, a.dedicated_used) {
+        (true, Some(0)) if a.shared_used.map_or(false, |u| u >= 1024 * 1024) => {}
+        (true, Some(u)) => parts.push(format!("{} / {}", format_bytes(u), format_bytes(a.dedicated))),
+        _ => {}
+    }
+    if let Some(u) = a.shared_used.filter(|u| *u >= 1024 * 1024 || a.dedicated == 0) {
+        parts.push(format!("{} {}", t("popup.shared"), format_bytes(u)));
+    }
+    parts.join(" \u{00B7} ")
 }
 
 fn draw_net(ui: &mut Ui, m: &MetricsData) {
@@ -1281,7 +1579,7 @@ fn draw_net(ui: &mut Ui, m: &MetricsData) {
     ui.clickable(start, Action::ToggleNetSeries(false));
     if !m.net_ping_host.is_empty() {
         // ICMP probe to the configured host while the popup is open
-        let ms = |v: Option<f32>| v.map(|v| format!("{v:.1} ms")).unwrap_or_else(|| t("popup.na"));
+        let ms = |v: Option<f32>| v.map(|v| format!("{v:.1} {}", unit("ms"))).unwrap_or_else(|| t("popup.na"));
         ui.section(&tf("popup.ping", &[("host", &m.net_ping_host)]));
         ui.row(&t("popup.latency"), &ms(m.net_latency));
         ui.row(&t("popup.jitter"), &ms(m.net_jitter));
@@ -1328,7 +1626,8 @@ fn draw_disk(ui: &mut Ui, m: &MetricsData) {
         1 => m.disks[0].model.clone(),
         n => tf("popup.physical_disks_n", &[("n", &n.to_string())]),
     };
-    ui.title(&head(m, "popup.disk"), &sub(m, &line));
+    let key = if m.disks.len() > 1 { "popup.disks" } else { "popup.disk" };
+    ui.title(&head(m, key), &sub(m, &line));
     let r: Vec<f32> = m.disk_history.iter().map(|v| v.0).collect();
     let w: Vec<f32> = m.disk_history.iter().map(|v| v.1).collect();
     let max = ui.chart2(&r, &w, 70.0, READ, WRITE, 1024.0 * 1024.0);
@@ -1339,25 +1638,61 @@ fn draw_disk(ui: &mut Ui, m: &MetricsData) {
     if !m.disks.is_empty() {
         ui.section(&t("popup.physical_disks"));
         for d in &m.disks {
-            let mut desc = String::new();
+            // "NVMe · 1 TB · 38 °C"; rates, activity, SSD / TRIM, serial and firmware open with a click
+            // on the name
+            let mut parts: Vec<String> = Vec::new();
             if !d.bus.is_empty() {
-                desc.push_str(d.bus);
+                parts.push(d.bus.to_string());
             }
             if d.size > 0 {
-                if !desc.is_empty() {
-                    desc.push_str(" · ");
-                }
-                desc.push_str(&format_bytes(d.size));
+                parts.push(format_bytes(d.size));
             }
+            if let Some(c) = d.temp {
+                parts.push(format!("{c:.0} \u{00B0}C"));
+            }
+            let desc = parts.join(" · ");
             let start = ui.y;
             let (lc, vc) = (ui.on_off(ui.t.text, d.enabled), ui.on_off(ui.t.dim, d.enabled));
+            let key = format!("disk:{}", d.model);
+            let open = ui.expanded.contains(&key);
             ui.row_lv(&d.model, &desc, lc, vc);
-            let rw = format!("{} / {}", format_bytes_rate(d.read_bps), format_bytes_rate(d.write_bps));
-            ui.row_lv(&format!("    {}", t("popup.read_write")), &rw, vc, ui.on_off(ui.t.text, d.enabled));
+            // the name itself opens the details (the rest of the block switches the disk)
+            let f = ui.font(11.0, FW_NORMAL);
+            let name_w = ui.c.measure_text(&d.model, f).0.min(ui.w / 2);
+            ui.hits.push(Hit { x: 0, y: start, w: name_w + ui.t.s(4.0), h: ui.y - start, action: Action::Expand(key) });
+            if open {
+                // the disk's own rates and activity
+                let rw = format!("{} / {}", format_bytes_rate(d.read_bps), format_bytes_rate(d.write_bps));
+                ui.row_lv(&format!("    {}", t("popup.read_write")), &rw, vc, ui.on_off(ui.t.text, d.enabled));
+                if let Some(a) = d.active {
+                    // "12% · 0.4 ms · 150 IOPS"
+                    let mut text = format!("{} · {:.1} {} · {} IOPS", pct(a), d.latency_ms.unwrap_or(0.0), unit("ms"), grouped(d.iops.unwrap_or(0.0).round() as u64));
+                    if let Some(q) = d.queue.filter(|q| *q >= 1.0) {
+                        text.push_str(&format!(" · {}", tf("popup.queue", &[("n", &format!("{q:.0}"))])));
+                    }
+                    ui.row_lv(&format!("    {}", t("popup.activity")), &text, vc, ui.on_off(ui.t.text, d.enabled));
+                }
+                // SSD / HDD and TRIM, serial (copies on click), firmware
+                let mut segs: Vec<(String, Option<String>)> = Vec::new();
+                match d.ssd {
+                    Some(true) => segs.push((if d.trim == Some(true) { "SSD (TRIM)".to_string() } else { "SSD".to_string() }, None)),
+                    Some(false) => segs.push(("HDD".to_string(), None)),
+                    None => {}
+                }
+                if !d.serial.is_empty() {
+                    segs.push((format!("S/N {}", d.serial), Some(d.serial.clone())));
+                }
+                if !d.firmware.is_empty() {
+                    segs.push((format!("FW {}", d.firmware), None));
+                }
+                if !segs.is_empty() {
+                    ui.info_row(&segs, " · ", ui.on_off(ui.t.dim, d.enabled));
+                }
+            }
             ui.clickable(start, Action::ToggleDisk(d.model.clone()));
         }
     }
-    ui.section(&t("popup.top_processes"));
+    ui.proc_section(&t("popup.top_processes"), m.host.is_empty());
     ui.processes(&m.top_io, ProcMode::Io, m.top_n, m.host.is_empty());
     ui.section(&t("popup.drives"));
     for d in &m.drives {
@@ -1408,10 +1743,10 @@ fn draw_battery(ui: &mut Ui, m: &MetricsData) {
     if let Some(d) = m.battery_detail {
         ui.section(&t("popup.details"));
         if d.rate_mw != 0 {
-            ui.row(&t("popup.power"), &format!("{:.1} W", d.rate_mw.abs() as f32 / 1000.0));
+            ui.row(&t("popup.power"), &format!("{:.1} {}", d.rate_mw.abs() as f32 / 1000.0, unit("w")));
         }
         if d.max_mwh > 0 {
-            ui.row(&t("popup.capacity"), &format!("{:.1} / {:.1} Wh", d.remaining_mwh as f32 / 1000.0, d.max_mwh as f32 / 1000.0));
+            ui.row(&t("popup.capacity"), &format!("{:.1} / {:.1} {}", d.remaining_mwh as f32 / 1000.0, d.max_mwh as f32 / 1000.0, unit("wh")));
         }
     }
 }

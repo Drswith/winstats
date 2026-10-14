@@ -61,6 +61,11 @@ pub struct ProcInfo {
     pub mem: u64,
     /// read + write transfer, bytes/s (all I/O the process does: files, pipes, sockets)
     pub io: f64,
+    /// GPU process list only: busiest engine 0..1 and dedicated + shared GPU memory, bytes
+    pub gpu: f32,
+    pub vram: u64,
+    /// run by the system (services, session 0, other accounts such as DWM) rather than the user
+    pub system: bool,
 }
 
 pub struct Processes {
@@ -76,6 +81,15 @@ pub struct Processes {
     pub top_io: Vec<ProcInfo>,
     /// sum of every process's private working set, bytes
     pub mem_total: u64,
+    /// image name and system flag per process id from the last sample (the GPU list)
+    pub names: HashMap<u32, (String, bool)>,
+    /// which lists show system and user processes (the SYS / USER filter buttons)
+    pub show_system: bool,
+    pub show_user: bool,
+    /// system flag per (pid, create time): the owner check opens the process, so once only
+    owners: HashMap<(u32, i64), bool>,
+    /// SID of the account winstats runs as
+    my_sid: Vec<u8>,
 }
 
 impl Processes {
@@ -90,6 +104,11 @@ impl Processes {
             top_mem: Vec::new(),
             top_io: Vec::new(),
             mem_total: 0,
+            names: HashMap::new(),
+            show_system: true,
+            show_user: true,
+            owners: HashMap::new(),
+            my_sid: current_sid().unwrap_or_default(),
         }
     }
 
@@ -147,21 +166,34 @@ impl Processes {
             };
             cur.insert(key, (t, xfer));
             if pid != 0 {
-                all.push(ProcInfo { pid, name, cpu, mem: p.working_set_private_size.max(0) as u64, io });
+                let system = match self.owners.get(&key) {
+                    Some(v) => *v,
+                    None => {
+                        let v = is_system(pid, p.session_id, &self.my_sid);
+                        self.owners.insert(key, v);
+                        v
+                    }
+                };
+                all.push(ProcInfo { pid, name, cpu, mem: p.working_set_private_size.max(0) as u64, io, gpu: 0.0, vram: 0, system });
             }
             if p.next_entry_offset == 0 {
                 break;
             }
             off += p.next_entry_offset as usize;
         }
+        // forget the owners of processes that are gone
+        self.owners.retain(|k, _| cur.contains_key(k));
         self.prev = cur;
         self.prev_at = Some(now);
 
         self.mem_total = all.iter().map(|p| p.mem).sum();
+        self.names = all.iter().map(|p| (p.pid, (p.name.clone(), p.system))).collect();
+        let (show_system, show_user) = (self.show_system, self.show_user);
+        all.retain(|p| if p.system { show_system } else { show_user });
         // merge same-name processes (browser tabs etc.) into one row per app
         let mut merged: HashMap<String, ProcInfo> = HashMap::new();
         for p in all {
-            let e = merged.entry(p.name.clone()).or_insert(ProcInfo { pid: p.pid, name: p.name.clone(), cpu: 0.0, mem: 0, io: 0.0 });
+            let e = merged.entry(p.name.clone()).or_insert(ProcInfo { pid: p.pid, name: p.name.clone(), cpu: 0.0, mem: 0, io: 0.0, gpu: 0.0, vram: 0, system: p.system });
             e.cpu += p.cpu;
             e.mem += p.mem;
             e.io += p.io;
@@ -174,6 +206,78 @@ impl Processes {
         self.top_mem = v.iter().take(n).cloned().collect();
         v.sort_by(|a, b| b.io.partial_cmp(&a.io).unwrap_or(std::cmp::Ordering::Equal));
         self.top_io = v.iter().filter(|p| p.io > 0.0).take(n).cloned().collect();
+    }
+}
+
+/// The GPU list: per-process load (busiest engine) and GPU memory merged by image name like the
+/// other lists, busiest first; processes without GPU work or memory are left out.
+pub fn top_gpu(load: &HashMap<u32, f32>, mem: &HashMap<u32, (u64, u64)>, names: &HashMap<u32, (String, bool)>, filter: (bool, bool), n: usize) -> Vec<ProcInfo> {
+    let mut merged: HashMap<String, ProcInfo> = HashMap::new();
+    let pids: std::collections::HashSet<u32> = load.keys().chain(mem.keys()).cloned().collect();
+    for pid in pids {
+        let g = load.get(&pid).cloned().unwrap_or(0.0);
+        let v = mem.get(&pid).map(|m| m.0 + m.1).unwrap_or(0);
+        if g <= 0.0 && v == 0 {
+            continue;
+        }
+        // a process that is not in the last snapshot counts as a system one
+        let (name, system) = names.get(&pid).cloned().unwrap_or_else(|| (format!("pid {pid}"), true));
+        if !(if system { filter.0 } else { filter.1 }) {
+            continue;
+        }
+        let e = merged.entry(name.clone()).or_insert(ProcInfo { pid, name, cpu: 0.0, mem: 0, io: 0.0, gpu: 0.0, vram: 0, system });
+        // engines are shared: the app's load is its busiest process, memory adds up
+        e.gpu = e.gpu.max(g);
+        e.vram += v;
+    }
+    let mut v: Vec<ProcInfo> = merged.into_values().collect();
+    v.sort_by(|a, b| b.gpu.partial_cmp(&a.gpu).unwrap_or(std::cmp::Ordering::Equal).then(b.vram.cmp(&a.vram)));
+    v.truncate(n);
+    v
+}
+
+/// The account (SID bytes) of this process.
+fn current_sid() -> Option<Vec<u8>> {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe { token_sid(GetCurrentProcess()) }
+}
+
+/// SID bytes of the account a process runs as.
+unsafe fn token_sid(process: windows::Win32::Foundation::HANDLE) -> Option<Vec<u8>> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows::Win32::System::Threading::OpenProcessToken;
+    let mut token = HANDLE::default();
+    OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
+    let mut buf = vec![0u8; 256];
+    let mut len = 0u32;
+    let ok = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr() as *mut _), buf.len() as u32, &mut len).is_ok();
+    let _ = CloseHandle(token);
+    if !ok {
+        return None;
+    }
+    let user = &*(buf.as_ptr() as *const TOKEN_USER);
+    let sid = user.User.Sid;
+    if sid.0.is_null() {
+        return None;
+    }
+    let n = GetLengthSid(sid) as usize;
+    Some(std::slice::from_raw_parts(sid.0 as *const u8, n).to_vec())
+}
+
+/// System process: session 0 (services, the kernel), or another account than ours (DWM, SYSTEM,
+/// other users). One the user cannot even open is the system's too.
+fn is_system(pid: u32, session: u32, mine: &[u8]) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid <= 4 || session == 0 || mine.is_empty() {
+        return true;
+    }
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return true };
+        let sid = token_sid(h);
+        let _ = CloseHandle(h);
+        sid.map_or(true, |s| s != mine)
     }
 }
 

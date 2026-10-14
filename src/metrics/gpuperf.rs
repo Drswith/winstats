@@ -9,20 +9,38 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::core::{s, w};
 
 /// KMTQUERYADAPTERINFOTYPE values
+const KMTQAITYPE_ADAPTERADDRESS: i32 = 6;
 const KMTQAITYPE_NODEPERFDATA: i32 = 61;
 const KMTQAITYPE_ADAPTERPERFDATA: i32 = 62;
 
-/// One reading; every field is None when the driver does not report it.
+/// One reading; every field is None when no source reports it. D3DKMT fills the common part,
+/// the vendor libraries (NVML, ADL) add or override what they know.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Perf {
     /// °C
     pub temp: Option<f32>,
+    /// hottest point of the die, °C (vendor libraries)
+    pub hotspot: Option<f32>,
     /// engine clock of the 3D node, MHz
     pub core_mhz: Option<u32>,
     /// memory clock, MHz
     pub mem_mhz: Option<u32>,
     /// share of the power budget, 0..1
     pub power: Option<f32>,
+    /// board power and its enforced limit, W (vendor libraries)
+    pub power_w: Option<f32>,
+    pub power_limit_w: Option<f32>,
+    pub fan_rpm: Option<u32>,
+    /// fan duty, percent (vendor libraries)
+    pub fan_pct: Option<u32>,
+    /// bytes/s moved through the memory bus and over PCIe
+    pub mem_bw: Option<f64>,
+    pub pcie_bw: Option<f64>,
+    /// current and maximum PCIe link: generation and lane count (vendor libraries)
+    pub pcie_gen: Option<u32>,
+    pub pcie_width: Option<u32>,
+    pub pcie_max_gen: Option<u32>,
+    pub pcie_max_width: Option<u32>,
 }
 
 #[repr(C)]
@@ -88,6 +106,8 @@ pub struct GpuPerf {
     close: CloseFn,
     /// open kernel adapter handle per LUID
     handles: Vec<(u64, u32)>,
+    /// per LUID: the byte counters of the last read, for the transfer rates
+    prev: Vec<(u64, std::time::Instant, u64, u64)>,
 }
 
 impl GpuPerf {
@@ -108,7 +128,7 @@ impl GpuPerf {
             if handles.is_empty() {
                 return None;
             }
-            Some(Self { query, close, handles })
+            Some(Self { query, close, handles, prev: Vec::new() })
         }
     }
 
@@ -117,8 +137,15 @@ impl GpuPerf {
         unsafe { (self.query)(&q) == 0 }
     }
 
+    /// PCI bus number of the adapter with this LUID (to find it in the vendor libraries).
+    pub fn bus(&self, luid: u64) -> Option<u32> {
+        let &(_, adapter) = self.handles.iter().find(|h| h.0 == luid)?;
+        let mut a = [0u32; 3];
+        self.query(adapter, KMTQAITYPE_ADAPTERADDRESS, &mut a).then_some(a[0])
+    }
+
     /// Sensors of the adapter with this LUID; implausible values (no sensor reads as 0) are None.
-    pub fn read(&self, luid: u64) -> Perf {
+    pub fn read(&mut self, luid: u64) -> Perf {
         let Some(&(_, adapter)) = self.handles.iter().find(|h| h.0 == luid) else { return Perf::default() };
         let mut perf = Perf::default();
         let mut a = AdapterPerfData::default();
@@ -127,6 +154,20 @@ impl GpuPerf {
             perf.temp = (c > 0.0 && c < 150.0).then_some(c);
             perf.mem_mhz = mhz(a.memory_frequency);
             perf.power = (a.power > 0 && a.power <= 2000).then_some(a.power as f32 / 1000.0);
+            perf.fan_rpm = (a.fan_rpm > 0 && a.fan_rpm < 20_000).then_some(a.fan_rpm);
+            // the bandwidth fields count bytes moved so far: a rate needs two reads
+            let now = std::time::Instant::now();
+            if let Some(p) = self.prev.iter_mut().find(|p| p.0 == luid) {
+                let dt = now.duration_since(p.1).as_secs_f64();
+                if dt > 0.05 {
+                    let rate = |cur: u64, old: u64| (cur > 0 && cur >= old).then(|| (cur - old) as f64 / dt);
+                    perf.mem_bw = rate(a.memory_bandwidth, p.2);
+                    perf.pcie_bw = rate(a.pcie_bandwidth, p.3);
+                }
+                *p = (luid, now, a.memory_bandwidth, a.pcie_bandwidth);
+            } else {
+                self.prev.push((luid, now, a.memory_bandwidth, a.pcie_bandwidth));
+            }
         }
         // node 0 is the 3D engine
         let mut n = NodePerfData::default();

@@ -162,6 +162,25 @@ impl Pdh {
         }
     }
 
+    /// GPU load per process id, Task Manager style: per process the busiest engine type of any
+    /// adapter. Uses the last collected sample, so it costs no extra query.
+    pub fn gpu_by_pid(&self) -> HashMap<u32, f32> {
+        let Some(g) = self.gpu else { return HashMap::new() };
+        let mut per: HashMap<(u32, u64, String), f64> = HashMap::new();
+        for (name, v) in Self::array(g) {
+            let Some(pid) = pid_of(&name) else { continue };
+            let engtype = name.rsplit("engtype_").next().unwrap_or("").to_string();
+            *per.entry((pid, luid_of(&name), engtype)).or_default() += v;
+        }
+        let mut out: HashMap<u32, f32> = HashMap::new();
+        for ((pid, _, _), v) in per {
+            let v = (v / 100.0).clamp(0.0, 1.0) as f32;
+            let e = out.entry(pid).or_insert(0.0);
+            *e = e.max(v);
+        }
+        out
+    }
+
     pub fn update(&mut self) {
         unsafe {
             if PdhCollectQueryData(self.query) != 0 {
@@ -178,6 +197,152 @@ impl Pdh {
             if let Some(v) = Self::gpu_values(g) {
                 self.gpu_loads = v;
             }
+        }
+    }
+}
+
+/// The process id in a GPU Engine / GPU Process Memory instance name ("pid_1234_luid_...").
+fn pid_of(name: &str) -> Option<u32> {
+    name.strip_prefix("pid_")?.split('_').next()?.parse().ok()
+}
+
+/// Counters only the popups show, in a query of their own that is created when a popup first
+/// opens and collected only while one is open. Each counter is optional: a missing one (older
+/// Windows, no GPU counters) leaves its values empty.
+pub struct Details {
+    query: isize,
+    ctx_switches: Option<isize>,
+    interrupts: Option<isize>,
+    dpc_time: Option<isize>,
+    interrupt_time: Option<isize>,
+    perf_limit: Option<isize>,
+    /// ACPI thermal zones: tenths of a kelvin (Windows 10+), whole kelvins (older)
+    zone_temp_hp: Option<isize>,
+    zone_temp: Option<isize>,
+    disk_idle: Option<isize>,
+    disk_queue: Option<isize>,
+    disk_latency: Option<isize>,
+    disk_iops: Option<isize>,
+    gpu_proc_dedicated: Option<isize>,
+    gpu_proc_shared: Option<isize>,
+    gpu_adapter_dedicated: Option<isize>,
+    gpu_adapter_shared: Option<isize>,
+}
+
+#[derive(Default)]
+pub struct DetailSample {
+    /// per second
+    pub ctx_switches: Option<f64>,
+    pub interrupts: Option<f64>,
+    /// share of CPU time, 0..1
+    pub dpc_time: Option<f32>,
+    pub interrupt_time: Option<f32>,
+    /// % Performance Limit: below 1 when the CPU is held back (thermal, power, firmware)
+    pub perf_limit: Option<f32>,
+    /// hottest ACPI thermal zone, °C; on most machines the zone follows the CPU package
+    pub zone_temp: Option<f32>,
+    /// per PhysicalDriveN index: (busy 0..1, queue length, ms per transfer, transfers/s)
+    pub disks: Vec<(u32, f32, f32, f32, f32)>,
+    /// per process id: (dedicated, shared) GPU memory in bytes, summed over adapters
+    pub gpu_proc_mem: HashMap<u32, (u64, u64)>,
+    /// per adapter LUID: (dedicated, shared) GPU memory in use, bytes
+    pub gpu_adapter_mem: HashMap<u64, (u64, u64)>,
+}
+
+impl Details {
+    pub fn new() -> Option<Self> {
+        unsafe {
+            let mut query = 0isize;
+            if PdhOpenQueryW(None, 0, &mut query) != 0 {
+                return None;
+            }
+            let add = |path: &str| -> Option<isize> {
+                let mut c = 0isize;
+                let p = wide(path);
+                if PdhAddEnglishCounterW(query, pcwstr(&p), 0, &mut c) == 0 { Some(c) } else { None }
+            };
+            let d = Self {
+                query,
+                ctx_switches: add(r"\System\Context Switches/sec"),
+                interrupts: add(r"\Processor(_Total)\Interrupts/sec"),
+                dpc_time: add(r"\Processor(_Total)\% DPC Time"),
+                interrupt_time: add(r"\Processor(_Total)\% Interrupt Time"),
+                perf_limit: add(r"\Processor Information(_Total)\% Performance Limit"),
+                zone_temp_hp: add(r"\Thermal Zone Information(*)\High Precision Temperature"),
+                zone_temp: add(r"\Thermal Zone Information(*)\Temperature"),
+                disk_idle: add(r"\PhysicalDisk(*)\% Idle Time"),
+                disk_queue: add(r"\PhysicalDisk(*)\Current Disk Queue Length"),
+                disk_latency: add(r"\PhysicalDisk(*)\Avg. Disk sec/Transfer"),
+                disk_iops: add(r"\PhysicalDisk(*)\Disk Transfers/sec"),
+                gpu_proc_dedicated: add(r"\GPU Process Memory(*)\Dedicated Usage"),
+                gpu_proc_shared: add(r"\GPU Process Memory(*)\Shared Usage"),
+                gpu_adapter_dedicated: add(r"\GPU Adapter Memory(*)\Dedicated Usage"),
+                gpu_adapter_shared: add(r"\GPU Adapter Memory(*)\Shared Usage"),
+            };
+            let _ = PdhCollectQueryData(query);
+            Some(d)
+        }
+    }
+
+    pub fn update(&mut self) -> DetailSample {
+        let mut s = DetailSample::default();
+        if unsafe { PdhCollectQueryData(self.query) } != 0 {
+            return s;
+        }
+        let val = |c: Option<isize>| c.and_then(Pdh::value);
+        s.ctx_switches = val(self.ctx_switches);
+        s.interrupts = val(self.interrupts);
+        s.dpc_time = val(self.dpc_time).map(|v| (v / 100.0).clamp(0.0, 1.0) as f32);
+        s.interrupt_time = val(self.interrupt_time).map(|v| (v / 100.0).clamp(0.0, 1.0) as f32);
+        s.perf_limit = val(self.perf_limit).filter(|v| *v > 0.0).map(|v| (v / 100.0).clamp(0.0, 1.0) as f32);
+        s.zone_temp = zone_temp(self.zone_temp_hp, 10.0).or_else(|| zone_temp(self.zone_temp, 1.0));
+
+        // physical disks: instances are "0 C:", "1 D: E:" (and "_Total")
+        let index_of = |name: &str| -> Option<u32> { name.split_whitespace().next()?.parse().ok() };
+        let arr = |c: Option<isize>| -> Vec<(u32, f64)> { c.map(Pdh::array).unwrap_or_default().into_iter().filter_map(|(n, v)| index_of(&n).map(|i| (i, v))).collect() };
+        let (idle, queue, lat, iops) = (arr(self.disk_idle), arr(self.disk_queue), arr(self.disk_latency), arr(self.disk_iops));
+        for (i, idle) in &idle {
+            let find = |v: &Vec<(u32, f64)>| v.iter().find(|e| e.0 == *i).map(|e| e.1).unwrap_or(0.0);
+            let busy = (1.0 - idle / 100.0).clamp(0.0, 1.0) as f32;
+            s.disks.push((*i, busy, find(&queue) as f32, (find(&lat) * 1000.0) as f32, find(&iops) as f32));
+        }
+
+        let mut sum_pid = |c: Option<isize>, dedicated: bool| {
+            for (name, v) in c.map(Pdh::array).unwrap_or_default() {
+                let Some(pid) = pid_of(&name) else { continue };
+                let e = s.gpu_proc_mem.entry(pid).or_default();
+                if dedicated { e.0 += v.max(0.0) as u64 } else { e.1 += v.max(0.0) as u64 }
+            }
+        };
+        sum_pid(self.gpu_proc_dedicated, true);
+        sum_pid(self.gpu_proc_shared, false);
+        for (c, dedicated) in [(self.gpu_adapter_dedicated, true), (self.gpu_adapter_shared, false)] {
+            for (name, v) in c.map(Pdh::array).unwrap_or_default() {
+                let e = s.gpu_adapter_mem.entry(luid_of(&name)).or_default();
+                if dedicated { e.0 += v.max(0.0) as u64 } else { e.1 += v.max(0.0) as u64 }
+            }
+        }
+        s
+    }
+}
+
+/// The hottest plausible zone in °C. Zones stuck at the ACPI placeholder 27.8 °C (301 K,
+/// firmware without a real sensor) and out-of-range readings are skipped.
+fn zone_temp(counter: Option<isize>, per_kelvin: f64) -> Option<f32> {
+    counter
+        .map(Pdh::array)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, v)| v / per_kelvin - 273.15)
+        .filter(|c| *c > 5.0 && *c < 125.0 && (*c - 27.85).abs() > 0.2)
+        .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.max(c))))
+        .map(|c| c as f32)
+}
+
+impl Drop for Details {
+    fn drop(&mut self) {
+        unsafe {
+            PdhCloseQuery(self.query);
         }
     }
 }

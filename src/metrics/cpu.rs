@@ -22,6 +22,8 @@ pub struct Cpu {
     pub system: f32,
     pub user: f32,
     pub name: String,
+    /// model name per package (socket), in package order
+    pub socket_names: Vec<String>,
     /// EfficiencyClass per logical processor (higher = faster core; hybrid Intel: P = 1, E = 0).
     pub classes: Vec<u8>,
     /// Package (socket) index per logical processor.
@@ -101,13 +103,21 @@ impl Cpu {
             GetSystemInfo(&mut si);
             si.dwNumberOfProcessors.max(1) as usize
         };
-        let name = crate::util::reg_sz_hklm(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString")
-            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
-            .unwrap_or_default();
+        let name_of = |i: usize| {
+            crate::util::reg_sz_hklm(&format!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\{i}"), "ProcessorNameString")
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default()
+        };
+        let name = name_of(0);
         let classes = efficiency_classes(n);
         let packages = package_ids(n);
+        // the registry keys follow the logical processor numbers: the first one of each package
+        let sockets = packages.iter().cloned().max().map_or(1, |m| m as usize + 1);
+        let socket_names = (0..sockets)
+            .map(|p| packages.iter().position(|&x| x as usize == p).map(name_of).filter(|s| !s.is_empty()).unwrap_or_else(|| name.clone()))
+            .collect();
         let smt = smt_threads(n);
-        let mut c = Self { prev: vec![ProcPerf::default(); n], cores: vec![0.0; n], total: 0.0, system: 0.0, user: 0.0, name, classes, packages, smt };
+        let mut c = Self { prev: vec![ProcPerf::default(); n], cores: vec![0.0; n], total: 0.0, system: 0.0, user: 0.0, name, socket_names, classes, packages, smt };
         let _ = c.query(); // prime
         c
     }

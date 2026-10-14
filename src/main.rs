@@ -271,6 +271,8 @@ fn main() {
 
     let mut metrics = Metrics::new(&cfg.disk, cfg.top_processes as usize, &cfg.net_disabled, &cfg.disks_disabled);
     metrics.set_gpu_disabled(&cfg.gpu_disabled);
+    metrics.proc_interval_ms = cfg.proc_update_ms;
+    metrics.set_proc_filter(cfg.proc_show_system, cfg.proc_show_user);
     metrics.set_group_pe(cfg.group_pe_cores);
     if first_run {
         // do not start with widgets this machine cannot feed
@@ -286,7 +288,11 @@ fn main() {
         }
     }
     let widgets = widgets::build(&cfg.widgets);
-    let popup = Popup::new(hinstance, "WinStatsPopup", backdrop::Opacity::from_config(&cfg.popup_opacity)).expect("popup window");
+    let mut popup = Popup::new(hinstance, "WinStatsPopup", backdrop::Opacity::from_config(&cfg.popup_opacity)).expect("popup window");
+    popup.proc_filter = (cfg.proc_show_system, cfg.proc_show_user);
+    for key in &cfg.popup_more {
+        popup.toggle_expand(key.clone());
+    }
     let about = About::new(hinstance, "WinStatsAbout").expect("about window");
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
@@ -529,6 +535,8 @@ impl App {
             }
         }
         let share_details = self.share.as_ref().map_or(false, |s| s.details_wanted());
+        self.metrics.gpu_details = self.popup.visible && self.popup.source.is_none() && self.popup.kind == Some(Kind::Gpu);
+        let started = std::time::Instant::now();
         self.metrics.update((self.popup.visible && self.popup.source.is_none()) || share_details);
         // latency probe only while the local network popup is open
         let net_open = self.popup.visible && self.popup.source.is_none() && self.popup.kind == Some(Kind::Net);
@@ -551,6 +559,11 @@ impl App {
         }
         if !self.fullscreen_hidden {
             self.render();
+        }
+        // the whole tick runs on the UI thread: anything slow here is a visible stall
+        let ms = started.elapsed().as_millis();
+        if ms > 250 {
+            log!("slow tick: {ms} ms");
         }
     }
 
@@ -775,7 +788,10 @@ impl App {
         };
         if self.popup.toggle(kind, source.clone(), wi, anchor, tray_rc) {
             match source {
-                None => self.metrics.begin_details(),
+                None => {
+                    self.metrics.gpu_details = kind == Kind::Gpu;
+                    self.metrics.begin_details()
+                }
                 Some(key) => self.remotes.request_details(&key, self.cfg.top_processes as usize),
             }
             self.render_popup(true);
@@ -936,6 +952,8 @@ impl App {
         self.widgets = widgets::build(&self.cfg.widgets);
         self.metrics = Metrics::new(&self.cfg.disk, self.cfg.top_processes as usize, &self.cfg.net_disabled, &self.cfg.disks_disabled);
         self.metrics.set_gpu_disabled(&self.cfg.gpu_disabled);
+        self.metrics.proc_interval_ms = self.cfg.proc_update_ms;
+        self.metrics.set_proc_filter(self.cfg.proc_show_system, self.cfg.proc_show_user);
         self.metrics.set_group_pe(self.cfg.group_pe_cores);
         self.apply_share();
         unsafe {
@@ -1239,6 +1257,8 @@ const MENU_OPACITY_BASE: usize = 225;
 const POPUP_OPACITY: [(&str, &str); 4] =
     [("more", "menu.opacity_more"), ("system", "menu.opacity_system"), ("less", "menu.opacity_less"), ("solid", "menu.opacity_solid")];
 const MENU_INTERVAL_BASE: usize = 230;
+/// process list refresh: MENU_PROC_INTERVAL_BASE + index in INTERVALS
+const MENU_PROC_INTERVAL_BASE: usize = 240;
 /// per-module colour: MENU_COLOR_BASE + module_index * 20 + entry
 const MENU_COLOR_BASE: usize = 300;
 const MENU_COLOR_STRIDE: usize = 20;
@@ -1539,6 +1559,12 @@ unsafe fn build_menu(st: &MenuState) -> Option<HMENU> {
         }
         menu_submenu(menu, interval, &t("menu.update_interval"));
 
+        let proc_interval = CreatePopupMenu().ok()?;
+        for (i, (ms, title)) in INTERVALS.iter().enumerate() {
+            menu_item(proc_interval, MENU_PROC_INTERVAL_BASE + i, title, cfg.proc_update_ms == *ms);
+        }
+        menu_submenu(menu, proc_interval, &t("menu.proc_interval"));
+
         let theme = CreatePopupMenu().ok()?;
         menu_item(theme, MENU_THEME_AUTO, &t("menu.theme_auto"), cfg.theme == "auto");
         menu_item(theme, MENU_THEME_DARK, &t("menu.theme_dark"), cfg.theme == "dark");
@@ -1753,6 +1779,35 @@ impl App {
                 }
                 return;
             }
+            popup::Action::ProcFilter(system) => {
+                // one of the two stays on, or the lists would be empty
+                let (mut sys, mut user) = (self.cfg.proc_show_system, self.cfg.proc_show_user);
+                if *system { sys = !sys } else { user = !user }
+                if !sys && !user {
+                    return;
+                }
+                self.cfg.proc_show_system = sys;
+                self.cfg.proc_show_user = user;
+                self.cfg.save();
+                self.metrics.set_proc_filter(sys, user);
+                self.popup.proc_filter = (sys, user);
+                // rebuild the lists now rather than on the next refresh
+                self.metrics.refresh_processes();
+                self.render_popup(false);
+                return;
+            }
+            popup::Action::Expand(key) => {
+                self.popup.toggle_expand(key.clone());
+                // the block grew or shrank: size the window to it again
+                self.popup.relayout();
+                // the "More" folds are remembered, the other expanders last one popup
+                if key.starts_with("more:") {
+                    toggle(&mut self.cfg.popup_more, key.clone());
+                    self.cfg.save();
+                }
+                self.render_popup(false);
+                return;
+            }
             popup::Action::ToggleNetSeries(rx) => {
                 // at least one series stays on
                 if *rx {
@@ -1805,13 +1860,9 @@ impl App {
                 toggle(&mut self.cfg.disks_disabled, model);
                 self.metrics.set_disks_disabled(&self.cfg.disks_disabled);
             }
-            popup::Action::ToggleGpu(name) => {
-                let last = self.metrics.gpu_adapters.iter().filter(|a| a.enabled).count() <= 1
-                    && self.metrics.gpu_adapters.iter().any(|a| a.enabled && a.name == name);
-                if last {
-                    return;
-                }
-                toggle(&mut self.cfg.gpu_disabled, name);
+            popup::Action::SelectGpu(name) => {
+                // the chosen adapter alone: the popup, the load and the widget follow it
+                self.cfg.gpu_disabled = self.metrics.gpu_adapters.iter().map(|a| a.name.clone()).filter(|n| *n != name).collect();
                 self.metrics.set_gpu_disabled(&self.cfg.gpu_disabled);
             }
             _ => return,
@@ -2042,6 +2093,10 @@ impl App {
             c if (MENU_OPACITY_BASE..MENU_OPACITY_BASE + POPUP_OPACITY.len()).contains(&c) => {
                 self.cfg.popup_opacity = POPUP_OPACITY[c - MENU_OPACITY_BASE].0.into();
                 self.popup.opacity = backdrop::Opacity::from_config(&self.cfg.popup_opacity);
+            }
+            c if (MENU_PROC_INTERVAL_BASE..MENU_PROC_INTERVAL_BASE + INTERVALS.len()).contains(&c) => {
+                self.cfg.proc_update_ms = INTERVALS[c - MENU_PROC_INTERVAL_BASE].0;
+                self.metrics.proc_interval_ms = self.cfg.proc_update_ms;
             }
             c if (MENU_INTERVAL_BASE..MENU_INTERVAL_BASE + INTERVALS.len()).contains(&c) => {
                 self.cfg.update_ms = INTERVALS[c - MENU_INTERVAL_BASE].0;

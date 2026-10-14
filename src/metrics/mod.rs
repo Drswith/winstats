@@ -1,15 +1,20 @@
+pub mod amd;
 pub mod battery;
 pub mod cpu;
 pub mod disks;
 pub mod drives;
 pub mod gpu;
 pub mod gpuperf;
+pub mod gpustats;
+pub mod intel;
 pub mod mem;
 pub mod net;
+pub mod nvidia;
 pub mod ping;
 pub mod pdh;
 pub mod processes;
 pub mod smbios;
+pub mod sysinfo;
 
 use crate::util::{pcwstr, wide};
 use std::collections::VecDeque;
@@ -39,6 +44,8 @@ pub struct MetricsData {
     /// OS index of each displayed core (display order may group P-cores first)
     pub cpu_ids: Vec<u16>,
     pub cpu_sockets: usize,
+    /// model name per socket (local only; drawn when there are several)
+    pub cpu_socket_names: Vec<String>,
     pub cpu_history: VecDeque<f32>,
     pub mem_history: VecDeque<f32>,
     pub net_rx: f64,
@@ -82,6 +89,8 @@ pub struct MetricsData {
     pub top_cpu: Vec<processes::ProcInfo>,
     pub top_mem: Vec<processes::ProcInfo>,
     pub top_io: Vec<processes::ProcInfo>,
+    /// GPU load and memory per app (popup only; Windows 10 1709+ GPU counters)
+    pub top_gpu: Vec<processes::ProcInfo>,
     pub top_n: usize,
     /// memory breakdown for the popup (details only)
     pub mem_processes: u64,
@@ -102,6 +111,26 @@ pub struct MetricsData {
     pub cpu_freq: Vec<u32>,
     /// 1, 5, 15 minute load averages (Unix agents)
     pub load_avg: Vec<f32>,
+    /// popup details of the local machine; empty / None / 0 where unknown (and for agents)
+    pub sys: SysDetails,
+}
+
+/// Extra popup rows, all local-only and read while a popup is open (the CPU facts once).
+#[derive(Default, Clone)]
+pub struct SysDetails {
+    pub processes: u32,
+    pub threads: u32,
+    pub handles: u32,
+    pub uptime_secs: u64,
+    pub ctx_switches: Option<f64>,
+    pub interrupts: Option<f64>,
+    pub dpc_time: Option<f32>,
+    pub interrupt_time: Option<f32>,
+    pub perf_limit: Option<f32>,
+    pub cpu: sysinfo::CpuInfo,
+    pub pagefile_used: u64,
+    pub pagefile_total: u64,
+    pub hw_reserved: u64,
 }
 
 impl MetricsData {
@@ -166,6 +195,8 @@ pub struct Metrics {
     net: net::Net,
     pdh: Option<pdh::Pdh>,
     gpu_dev: gpu::Gpu,
+    /// GPU load from D3DKMT statistics where the GPU Engine counters are missing (Windows 7)
+    gpu_stats: Option<gpustats::GpuStatsWorker>,
     procs: processes::Processes,
     disk_letter: String,
     /// Display order: hardware index of each displayed core (P-cores first, then E-cores).
@@ -173,6 +204,20 @@ pub struct Metrics {
     cpu_order: Vec<usize>,
     /// read the per-disk counters every tick (sharing needs them), not only for the popup
     pub want_per_disk: bool,
+    /// the local GPU popup is open: read the GPU sensors, processes and vendor libraries
+    pub gpu_details: bool,
+    /// popup-only counters; opened the first time a popup shows details
+    details: Option<pdh::Details>,
+    /// the details query could not be opened: do not retry every tick
+    details_failed: bool,
+    /// last disk temperature read: disks are asked every few seconds only
+    disk_temp_at: Option<std::time::Instant>,
+    /// process lists refresh on their own, slower clock (config `proc_update_ms`) so the rows
+    /// stay readable while the charts move fast
+    pub proc_interval_ms: u32,
+    proc_at: Option<std::time::Instant>,
+    /// the process lists were just refreshed: the GPU list follows on this tick
+    procs_fresh: bool,
 }
 
 impl Deref for Metrics {
@@ -194,7 +239,13 @@ impl Metrics {
         let cores = cpu.cores.len();
         let gpu_dev = gpu::Gpu::new(&[]);
         let pdh = pdh::Pdh::new();
-        let gpu_available = pdh.as_ref().map(|p| p.gpu_available()).unwrap_or(false);
+        // WINSTATS_WIN7_GPU: take the Windows 7 path (no GPU Engine counters) for testing
+        let pdh_gpu = pdh.as_ref().map(|p| p.gpu_available()).unwrap_or(false) && std::env::var_os("WINSTATS_WIN7_GPU").is_none();
+        let gpu_stats = if pdh_gpu { None } else { gpustats::GpuStats::new(&gpu_dev.adapters.iter().map(|a| a.luid).collect::<Vec<_>>()).map(gpustats::GpuStatsWorker::start) };
+        if gpu_stats.is_some() {
+            crate::log!("GPU load from D3DKMT statistics");
+        }
+        let gpu_available = pdh_gpu || gpu_stats.is_some();
         let battery_available = battery::read().is_some();
         let cpu_order: Vec<usize> = (0..cores).collect();
         let mem_modules = smbios::memory_modules();
@@ -207,6 +258,7 @@ impl Metrics {
             cpu_smt: cpu.smt.clone(),
             cpu_ids: (0..cores as u16).collect(),
             cpu_sockets: cpu.packages.iter().cloned().max().map(|m| m as usize + 1).unwrap_or(1),
+            cpu_socket_names: cpu.socket_names.clone(),
             gpu_name: gpu_dev.name.clone(),
             gpu_adapters: gpu_dev.adapters.clone(),
             gpu_primary: gpu_dev.primary().cloned(),
@@ -216,6 +268,7 @@ impl Metrics {
             mem_channels,
             vram_total: gpu_dev.vram_total,
             top_n: top_n.max(1),
+            sys: SysDetails { cpu: sysinfo::cpu_info(), ..Default::default() },
             gpu_available,
             battery_available,
             ..Default::default()
@@ -226,10 +279,18 @@ impl Metrics {
             net: net::Net::new(net_disabled),
             pdh,
             gpu_dev,
+            gpu_stats,
             procs: processes::Processes::new(cores, top_n),
             disk_letter: disk_letter.to_string(),
             cpu_order,
             want_per_disk: false,
+            gpu_details: false,
+            details: None,
+            details_failed: false,
+            disk_temp_at: None,
+            proc_interval_ms: 2000,
+            proc_at: None,
+            procs_fresh: false,
         }
     }
 
@@ -279,7 +340,30 @@ impl Metrics {
     pub fn begin_details(&mut self) {
         self.procs.reset();
         self.procs.update();
+        // the first sample has no rates yet: the next tick refreshes the lists at once
+        self.proc_at = None;
         self.update_details();
+    }
+
+    /// SYS / USER filter of the process lists; the next tick rebuilds them.
+    pub fn set_proc_filter(&mut self, system: bool, user: bool) {
+        self.procs.show_system = system;
+        self.procs.show_user = user;
+        self.proc_at = None;
+    }
+
+    /// Rebuild the process lists now (after a filter change), without a new chart sample.
+    pub fn refresh_processes(&mut self) {
+        self.procs.update();
+        self.proc_at = Some(std::time::Instant::now());
+        let d = &mut self.data;
+        d.top_cpu = self.procs.top_cpu.clone();
+        d.top_mem = self.procs.top_mem.clone();
+        d.top_io = self.procs.top_io.clone();
+        // the GPU list follows on the next tick
+        d.top_gpu.clear();
+        self.procs_fresh = false;
+        self.proc_at = None;
     }
 
     /// The interfaces changed (adapter plugged / unplugged, link up / down): re-sample now
@@ -294,13 +378,65 @@ impl Metrics {
     }
 
     fn update_details(&mut self) {
+        if self.details.is_none() && !self.details_failed {
+            self.details = pdh::Details::new();
+            self.details_failed = self.details.is_none();
+        }
+        let sample = self.details.as_mut().map(|x| x.update()).unwrap_or_default();
         let d = &mut self.data;
+        d.sys.uptime_secs = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() } / 1000;
+        d.sys.ctx_switches = sample.ctx_switches;
+        d.sys.interrupts = sample.interrupts;
+        d.sys.dpc_time = sample.dpc_time;
+        d.sys.interrupt_time = sample.interrupt_time;
+        d.sys.perf_limit = sample.perf_limit;
+        d.cpu_temp = sample.zone_temp;
+        (d.sys.pagefile_used, d.sys.pagefile_total) = sysinfo::page_file();
+        if d.sys.hw_reserved == 0 && d.mem.total > 0 {
+            d.sys.hw_reserved = sysinfo::hardware_reserved(d.mem.total);
+        }
+        if self.disk_temp_at.map_or(true, |t| t.elapsed().as_secs() >= 10) {
+            self.disk_temp_at = Some(std::time::Instant::now());
+            for disk in d.disks.iter_mut() {
+                disk.temp = disks::temperature(disk.index);
+            }
+        }
+        for (index, busy, queue, ms, iops) in &sample.disks {
+            if let Some(disk) = d.disks.iter_mut().find(|disk| disk.index == *index) {
+                disk.active = Some(*busy);
+                disk.queue = Some(*queue);
+                disk.latency_ms = Some(*ms);
+                disk.iops = Some(*iops);
+            }
+        }
+        if self.gpu_details {
+            if self.procs_fresh {
+                let filter = (self.procs.show_system, self.procs.show_user);
+                let load = match (self.gpu_stats.as_mut(), self.pdh.as_ref()) {
+                    (Some(st), _) => Some(st.by_pid(self.procs.names.keys().cloned().collect())),
+                    (None, Some(p)) => Some(p.gpu_by_pid()),
+                    _ => None,
+                };
+                if let Some(load) = load {
+                    d.top_gpu = processes::top_gpu(&load, &sample.gpu_proc_mem, &self.procs.names, filter, d.top_n);
+                }
+            }
+            self.gpu_dev.set_adapter_mem(&sample.gpu_adapter_mem);
+        }
         self.net.update_details();
         d.net_iface = self.net.iface_name.clone();
         d.net_ip = self.net.iface_ip.clone();
         d.net_ifaces = self.net.ifaces.clone();
-        self.gpu_dev.update();
-        self.gpu_dev.update_perf();
+        if self.gpu_details {
+            // DXGI usage wakes a sleeping Optimus GPU and takes hundreds of ms: only for the GPU
+            // popup, and only where the adapter memory counters are missing
+            if self.gpu_dev.primary().map_or(false, |a| a.dedicated_used.is_none()) {
+                self.gpu_dev.update();
+            }
+            self.gpu_dev.update_perf();
+        } else {
+            self.gpu_dev.stop_perf();
+        }
         d.gpu_perf = self.gpu_dev.primary().map(|a| a.perf).unwrap_or_default();
         d.gpu_adapters = self.gpu_dev.adapters.clone();
         d.vram_used = self.gpu_dev.vram_used;
@@ -337,10 +473,19 @@ impl Metrics {
         d.net_ifaces = self.net.ifaces.clone();
         push(&mut d.net_history, (d.net_rx as f32, d.net_tx as f32));
 
+        if let Some(st) = self.gpu_stats.as_ref() {
+            if !details || !self.gpu_details {
+                st.by_pid(Vec::new());
+            }
+            d.gpu = self.gpu_dev.set_loads(&st.loads());
+            d.gpu_adapters = self.gpu_dev.adapters.clone();
+        }
         if let Some(p) = self.pdh.as_mut() {
             p.update();
-            d.gpu = self.gpu_dev.set_loads(&p.gpu_loads);
-            d.gpu_adapters = self.gpu_dev.adapters.clone();
+            if self.gpu_stats.is_none() {
+                d.gpu = self.gpu_dev.set_loads(&p.gpu_loads);
+                d.gpu_adapters = self.gpu_dev.adapters.clone();
+            }
             let raw = p.core_freqs();
             d.cpu_freq = if raw.len() >= self.cpu_order.len() { self.cpu_order.iter().map(|&i| raw.get(i).cloned().unwrap_or(0)).collect() } else { Vec::new() };
             if self.want_per_disk || d.disks.iter().any(|disk| !disk.enabled) {
@@ -375,17 +520,29 @@ impl Metrics {
         }
 
         d.battery = battery::read();
+        if !details || !self.gpu_details {
+            // the sensor thread reads only while the GPU popup is open
+            self.gpu_dev.stop_perf();
+        }
 
         if details {
-            self.procs.update();
-            d.top_cpu = self.procs.top_cpu.clone();
-            d.top_mem = self.procs.top_mem.clone();
-            d.top_io = self.procs.top_io.clone();
-            d.mem_processes = self.procs.mem_total;
+            let due = self.proc_at.map_or(true, |t| t.elapsed().as_millis() as u64 + 50 >= self.proc_interval_ms as u64);
+            self.procs_fresh = due;
+            if due {
+                self.proc_at = Some(std::time::Instant::now());
+                self.procs.update();
+                d.top_cpu = self.procs.top_cpu.clone();
+                d.top_mem = self.procs.top_mem.clone();
+                d.top_io = self.procs.top_io.clone();
+                d.mem_processes = self.procs.mem_total;
+            }
             unsafe {
                 use windows::Win32::System::ProcessStatus::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
                 let mut pi = PERFORMANCE_INFORMATION { cb: std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32, ..Default::default() };
                 if GetPerformanceInfo(&mut pi, pi.cb).is_ok() {
+                    d.sys.processes = pi.ProcessCount;
+                    d.sys.threads = pi.ThreadCount;
+                    d.sys.handles = pi.HandleCount;
                     let page = pi.PageSize as u64;
                     d.mem_kernel_paged = pi.KernelPaged as u64 * page;
                     d.mem_kernel_nonpaged = pi.KernelNonpaged as u64 * page;

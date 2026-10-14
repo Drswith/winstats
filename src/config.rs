@@ -41,6 +41,13 @@ pub struct Config {
     pub bar_width: String,
     /// Rows in the popup process lists: 5 | 10 | 15 | 20
     pub top_processes: u32,
+    /// How often the popup process lists refresh, ms (the charts follow `update_ms`)
+    pub proc_update_ms: u32,
+    /// Process lists show system processes (services, other accounts) / the user's own
+    pub proc_show_system: bool,
+    pub proc_show_user: bool,
+    /// Popups whose "More" rows are open, e.g. "more:cpu"
+    pub popup_more: Vec<String>,
     /// Vertical taskbar: chart widgets (by name, e.g. "cpu_line", "node1/net_chart") drawn across
     /// the full width of the taskbar, which shows a longer history.
     pub stretched: Vec<String>,
@@ -107,6 +114,10 @@ impl Default for Config {
             bar_width: "small".into(),
             mode: "auto".into(),
             top_processes: 8,
+            proc_update_ms: 2000,
+            proc_show_system: true,
+            proc_show_user: true,
+            popup_more: Vec::new(),
             stretched: Vec::new(),
             language: "auto".into(),
             net_disabled: Vec::new(),

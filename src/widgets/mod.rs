@@ -626,7 +626,11 @@ impl Widget for Speed {
     }
     fn width(&self, c: &mut Canvas, t: &Theme, m: &MetricsData) -> i32 {
         let f = t.font(8.5, FW_NORMAL);
-        let reserve = c.measure_text(if self.0 == Kind::Net && t.net_bits { "88.8 Mb/s" } else { "88.8 MB/s" }, f).0;
+        let reserve = if self.0 == Kind::Net && t.net_bits {
+            c.measure_text("88.8 Mb/s", f).0
+        } else {
+            c.measure_text(&format!("88.8 {}{}", crate::util::unit("mb"), crate::util::unit("per_s")), f).0
+        };
         let cur = pair_now(self.0, m, t).iter().map(|(v, _)| c.measure_text(&self.format_rate(*v, t), f).0).max().unwrap_or(0);
         label_width(t) + t.s(4.0) + t.s(3.0) + reserve.max(cur)
     }
@@ -666,7 +670,7 @@ impl Widget for MemText {
     }
     fn width(&self, c: &mut Canvas, t: &Theme, m: &MetricsData) -> i32 {
         let f = t.font(9.5, FW_SEMIBOLD);
-        let reserve = c.measure_text("88.88 GB", f).0;
+        let reserve = c.measure_text(&format!("88.88 {}", crate::util::unit("gb")), f).0;
         let cur = Self::rows(m).iter().map(|v| c.measure_text(v, f).0).max().unwrap_or(0);
         label_width(t) + reserve.max(cur)
     }
