@@ -150,7 +150,10 @@ unsafe fn sym<T: Copy>(lib: HMODULE, name: &[u8]) -> Option<T> {
 impl Amd {
     pub fn new() -> Option<Self> {
         #[cfg(target_pointer_width = "64")]
-        let lib = crate::util::load_system_dll(windows::core::w!("atiadlxx.dll"))?;
+        let Some(lib) = crate::util::load_system_dll(windows::core::w!("atiadlxx.dll")) else {
+            crate::log!("adl: atiadlxx.dll not found");
+            return None;
+        };
         #[cfg(not(target_pointer_width = "64"))]
         let lib = crate::util::load_system_dll(windows::core::w!("atiadlxy.dll")).or_else(|| crate::util::load_system_dll(windows::core::w!("atiadlxx.dll")))?;
         unsafe {
@@ -159,11 +162,14 @@ impl Amd {
             let info: FnInfo = sym(lib, b"ADL2_Adapter_AdapterInfo_Get\0")?;
             let caps: Option<FnCaps> = sym(lib, b"ADL2_Overdrive_Caps\0");
             let mut ctx: Context = std::ptr::null_mut();
-            if create(adl_malloc, 1, &mut ctx) != 0 || ctx.is_null() {
+            let rc = create(adl_malloc, 1, &mut ctx);
+            if rc != 0 || ctx.is_null() {
+                crate::log!("adl: ADL2_Main_Control_Create failed: {rc}");
                 return None;
             }
             let mut n = 0i32;
             if count(ctx, &mut n) != 0 || n <= 0 || n > 256 {
+                crate::log!("adl: no adapters ({n})");
                 return None;
             }
             let mut list: Vec<AdapterInfo> = (0..n).map(|_| std::mem::zeroed()).collect();
@@ -176,7 +182,8 @@ impl Amd {
             // one entry per display output: keep the first present AMD one per PCI bus
             let mut gpus: Vec<(i32, i32, i32)> = Vec::new();
             for a in &list {
-                if a.vendor_id != 0x1002 || gpus.iter().any(|g| g.0 == a.bus_number) {
+                // ADL reports the vendor as the decimal number 1002 (some versions as 0x1002)
+                if (a.vendor_id != 1002 && a.vendor_id != 0x1002) || gpus.iter().any(|g| g.0 == a.bus_number) {
                     continue;
                 }
                 let mut version = 0;
@@ -188,6 +195,8 @@ impl Amd {
                 }
                 gpus.push((a.bus_number, a.adapter_index, version));
             }
+            let vendors: Vec<i32> = list.iter().map(|a| a.vendor_id).collect();
+            crate::log!("adl: {n} adapter entries (vendors {vendors:?}), GPUs (bus, index, overdrive): {gpus:?}");
             if gpus.is_empty() {
                 return None;
             }
@@ -203,6 +212,53 @@ impl Amd {
                 gpus,
             })
         }
+    }
+
+    /// Raw answers of every call for the first GPU (`winstats --diag`).
+    pub fn probe(&self) -> String {
+        let Some(&(bus, idx, version)) = self.gpus.first() else { return "no GPU".into() };
+        let ctx = self.ctx;
+        let mut out = format!("bus {bus} index {idx} overdrive {version}\n");
+        unsafe {
+            if let Some(f) = self.temp5 {
+                let mut t = Temperature { size: std::mem::size_of::<Temperature>() as i32, ..Default::default() };
+                out += &format!("od5 temperature: rc {} value {}\n", f(ctx, idx, 0, &mut t), t.temperature);
+            }
+            if let Some(f) = self.activity {
+                let mut a = Activity { size: std::mem::size_of::<Activity>() as i32, ..Default::default() };
+                let rc = f(ctx, idx, &mut a);
+                out += &format!(
+                    "od5 activity: rc {rc} engine {} memory {} activity {}% bus {} lanes {}/{}\n",
+                    a.engine_clock, a.memory_clock, a.activity_percent, a.current_bus_speed, a.current_bus_lanes, a.maximum_bus_lanes
+                );
+            }
+            if let Some(f) = self.fan5 {
+                for kind in [FAN_PERCENT, FAN_RPM] {
+                    let mut s = FanSpeed { size: std::mem::size_of::<FanSpeed>() as i32, speed_type: kind, ..Default::default() };
+                    out += &format!("od5 fan {kind}: rc {} value {}\n", f(ctx, idx, 0, &mut s), s.fan_speed);
+                }
+            }
+            if let Some(f) = self.power6 {
+                let mut v = 0;
+                out += &format!("od6 power: rc {} value {}\n", f(ctx, idx, 0, &mut v), v);
+            }
+            if let Some(f) = self.temp_n {
+                for kind in [ODN_EDGE, ODN_HOTSPOT] {
+                    let mut v = 0;
+                    out += &format!("odn temperature {kind}: rc {} value {}\n", f(ctx, idx, kind, &mut v), v);
+                }
+            }
+            if let Some(f) = self.status_n {
+                let mut s = OdnStatus::default();
+                let rc = f(ctx, idx, &mut s);
+                out += &format!("odn status: rc {rc} core {} memory {} activity {}% lanes {}/{}\n", s.core_clock, s.memory_clock, s.activity_percent, s.bus_lanes, s.max_bus_lanes);
+            }
+            if let Some(f) = self.fan_n {
+                let mut s = OdnFan::default();
+                out += &format!("odn fan: rc {} mode {} speed {}\n", f(ctx, idx, &mut s), s.speed_mode, s.speed);
+            }
+        }
+        out
     }
 
     /// Add what ADL knows about the GPU on PCI `bus` (None: the only AMD GPU).
@@ -236,7 +292,8 @@ impl Amd {
                     }
                     let mut v = 0;
                     if f(ctx, idx, ODN_HOTSPOT, &mut v) == 0 {
-                        p.hotspot = celsius(v).or(p.hotspot);
+                        // Polaris has no junction sensor and repeats the edge reading there
+                        p.hotspot = celsius(v).filter(|h| Some(*h) != p.temp).or(p.hotspot);
                     }
                 }
                 // clocks and link of the Overdrive N cards, which answer the Overdrive 5

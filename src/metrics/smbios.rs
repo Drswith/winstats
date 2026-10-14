@@ -56,6 +56,21 @@ fn raw_table() -> Option<Vec<u8>> {
 }
 
 /// String `index` (1-based) from the string area that follows a formatted structure.
+/// BIOS defaults left in the memory fields ("Manufacturer00", "ModulePartNumber00",
+/// "Undefined", "Unknown", all zeros or FF) read as empty.
+fn placeholder(s: String) -> String {
+    let l = s.to_ascii_lowercase();
+    let junk = l.is_empty()
+        || l.starts_with("manufacturer")
+        || l.starts_with("modulepartnumber")
+        || l.starts_with("partnum")
+        || l == "undefined"
+        || l == "unknown"
+        || l == "not specified"
+        || l.chars().all(|c| c == '0' || c == 'f' || c == ' ');
+    if junk { String::new() } else { s }
+}
+
 fn smbios_string(strings: &[u8], index: u8) -> String {
     if index == 0 {
         return String::new();
@@ -123,8 +138,8 @@ pub fn memory_modules() -> Vec<MemModule> {
                     mem_type: type_name(formatted[0x12]),
                     speed: if len >= 0x17 { u16_at(0x15) as u32 } else { 0 },
                     configured_speed: if len >= 0x22 { u16_at(0x20) as u32 } else { 0 },
-                    manufacturer: if len >= 0x18 { smbios_string(strings, formatted[0x17]) } else { String::new() },
-                    part: if len >= 0x1B { smbios_string(strings, formatted[0x1A]) } else { String::new() },
+                    manufacturer: placeholder(if len >= 0x18 { smbios_string(strings, formatted[0x17]) } else { String::new() }),
+                    part: placeholder(if len >= 0x1B { smbios_string(strings, formatted[0x1A]) } else { String::new() }),
                     size,
                 });
             }

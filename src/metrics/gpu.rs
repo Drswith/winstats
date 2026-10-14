@@ -68,7 +68,9 @@ impl Gpu {
                 if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
                     continue;
                 }
-                let name = String::from_utf16_lossy(&desc.Description).trim_end_matches('\0').trim().to_string();
+                let raw = String::from_utf16_lossy(&desc.Description);
+                // Windows 7 AMD drivers append "   \Registry\Machine\..." after the name
+                let name = raw.split(['\0', '\\']).next().unwrap_or("").trim().to_string();
                 let driver = a
                     .CheckInterfaceSupport(&IDXGIDevice::IID)
                     .map(|v| {

@@ -71,6 +71,23 @@ struct PowerInfo {
     current_idle_state: u32,
 }
 
+/// Current clock of each logical processor from the power manager, MHz; for Windows 7 and 8,
+/// which lack the "% Processor Performance" counter. Coarse (the P-state, not turbo bins).
+pub fn current_clocks() -> Vec<u32> {
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1);
+    let mut v = vec![PowerInfo::default(); n.max(64)];
+    let size = (v.len() * std::mem::size_of::<PowerInfo>()) as u32;
+    let st = unsafe { CallNtPowerInformation(ProcessorInformation, None, 0, Some(v.as_mut_ptr() as *mut _), size) };
+    if st.is_err() {
+        return Vec::new();
+    }
+    let out: Vec<u32> = v.iter().take(n).map(|p| p.current_mhz).collect();
+    if out.iter().all(|m| *m == 0) {
+        return Vec::new();
+    }
+    out
+}
+
 fn base_clock() -> Option<u32> {
     let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1);
     let mut v = vec![PowerInfo::default(); n.max(64)];
@@ -111,18 +128,30 @@ fn boost_clock() -> Option<u32> {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn features() -> String {
-    let (max_leaf, ..) = cpuid(0, 0);
-    let (_, _, ecx1, _) = cpuid(1, 0);
-    let (_, ebx7, ..) = if max_leaf >= 7 { cpuid(7, 0) } else { (0, 0, 0, 0) };
-    let list = [
-        (ecx1 >> 20 & 1, "SSE4.2"),
-        (ecx1 >> 25 & 1, "AES"),
-        (ecx1 >> 28 & 1, "AVX"),
-        (ebx7 >> 5 & 1, "AVX2"),
-        (ebx7 >> 16 & 1, "AVX-512"),
-        (ebx7 >> 29 & 1, "SHA"),
-    ];
-    list.iter().filter(|(bit, _)| *bit == 1).map(|(_, name)| *name).collect::<Vec<_>>().join(" · ")
+    // four at most: the two newest vector extensions, virtualization, the 64-bit mode, then
+    // AES when there is room; named as in the full CPU-Z style list
+    let (max_leaf, vb, vc, vd) = cpuid(0, 0);
+    let intel = [vb, vd, vc].iter().flat_map(|r| r.to_le_bytes()).collect::<Vec<u8>>() == b"GenuineIntel";
+    let (max_ext, ..) = cpuid(0x8000_0000, 0);
+    let (_, _, c1, d1) = cpuid(1, 0);
+    let (_, b7, ..) = if max_leaf >= 7 { cpuid(7, 0) } else { (0, 0, 0, 0) };
+    let (_, _, ce, de) = if max_ext >= 0x8000_0001 { cpuid(0x8000_0001, 0) } else { (0, 0, 0, 0) };
+    let has = |reg: u32, bit: u32| reg >> bit & 1 == 1;
+    let vector = [(b7, 16, "AVX-512"), (b7, 5, "AVX2"), (c1, 28, "AVX"), (c1, 20, "SSE4.2"), (c1, 19, "SSE4.1"), (c1, 9, "SSSE3"), (c1, 0, "SSE3"), (d1, 26, "SSE2"), (d1, 25, "SSE")];
+    let mut v: Vec<&str> = vector.iter().filter(|(r, b, _)| has(*r, *b)).map(|(_, _, n)| *n).take(2).collect();
+    if has(c1, 5) {
+        v.push("VT-x");
+    } else if has(ce, 2) {
+        v.push("AMD-V");
+    }
+    if has(de, 29) {
+        v.push(if intel { "EM64T" } else { "x86-64" });
+    }
+    if has(c1, 25) {
+        v.push("AES");
+    }
+    v.truncate(4);
+    v.join(" · ")
 }
 
 /// The short line on ARM: Neon and the crypto extensions where present.

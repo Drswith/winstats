@@ -486,7 +486,10 @@ impl Metrics {
                 d.gpu = self.gpu_dev.set_loads(&p.gpu_loads);
                 d.gpu_adapters = self.gpu_dev.adapters.clone();
             }
-            let raw = p.core_freqs();
+            let mut raw = p.core_freqs();
+            if raw.is_empty() {
+                raw = sysinfo::current_clocks();
+            }
             d.cpu_freq = if raw.len() >= self.cpu_order.len() { self.cpu_order.iter().map(|&i| raw.get(i).cloned().unwrap_or(0)).collect() } else { Vec::new() };
             if self.want_per_disk || d.disks.iter().any(|disk| !disk.enabled) {
                 // some disks are switched off: sum the per-disk counters instead of _Total

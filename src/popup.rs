@@ -1046,8 +1046,10 @@ impl Ui<'_> {
         // legend
         let lf = self.font(10.0, FW_NORMAL);
         let lx = d + self.t.s(16.0);
-        let mut ly = self.y + self.t.s(2.0);
         let sw = self.t.s(8.0);
+        // centred on the pie
+        let rows_h: i32 = slices.iter().map(|(label, ..)| self.c.measure_text(label, lf).1 + self.t.s(4.0)).sum::<i32>() - self.t.s(4.0);
+        let mut ly = self.y + self.t.s(2.0) + ((d - rows_h) / 2).max(0);
         for (i, (label, v, col)) in slices.iter().enumerate() {
             let (_, th) = self.c.measure_text(label, lf);
             self.c.fill_round_rect(lx, ly + (th - sw) / 2, sw, sw, 2.0, *col);
@@ -1345,8 +1347,15 @@ fn draw_cpu(ui: &mut Ui, m: &MetricsData) {
         }
         let c = &m.sys.cpu;
         if c.cache.iter().any(|v| *v > 0) {
-            let size = |v: u64| if v > 0 { format_bytes(v) } else { "-".to_string() };
-            ui.row(&t("popup.cache"), &format!("{} / {} / {}", size(c.cache[0]), size(c.cache[1]), size(c.cache[2])));
+            // only the levels the CPU has: "Cache L1 / L2" on a Core 2 without L3
+            let levels: Vec<usize> = (0..3).filter(|i| c.cache[*i] > 0).collect();
+            let mut label = t("popup.cache");
+            if let Some(i) = label.find(" L1") {
+                label.truncate(i);
+                label.push(' ');
+                label.push_str(&levels.iter().map(|i| format!("L{}", i + 1)).collect::<Vec<_>>().join(" / "));
+            }
+            ui.row(&label, &levels.iter().map(|i| format_bytes(c.cache[*i])).collect::<Vec<_>>().join(" / "));
         }
         match (c.base_mhz, c.max_mhz) {
             (Some(b), Some(x)) if x > b => ui.row(&t("popup.base_max_clock"), &format!("{} / {}", clock_text(b), clock_text(x))),
@@ -1415,7 +1424,8 @@ fn draw_mem(ui: &mut Ui, m: &MetricsData) {
         let available = m.mem.total.saturating_sub(m.mem.used);
         ui.section(&t("popup.where_it_goes"));
         ui.pie(&[
-            (t("popup.processes_private"), m.mem_processes, ui.t.accent),
+            // red, not the accent: a dark system accent vanishes on the dark popup
+            (t("popup.processes_private"), m.mem_processes, Color::rgb(0xFF, 0x45, 0x3A)),
             (t("popup.kernel_pools"), kernel, Color::rgb(0xAF, 0x52, 0xDE)),
             (t("popup.other_memory"), other, Color::rgb(0xFF, 0x95, 0x00)),
             (t("popup.available_memory"), available, ui.t.dim.alpha(0.45)),
@@ -1427,7 +1437,7 @@ fn draw_mem(ui: &mut Ui, m: &MetricsData) {
 }
 
 fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
-    let temp = m.gpu_perf.temp.map(|c| format!("{c:.0} \u{00B0}")).unwrap_or_default();
+    let temp = m.gpu_perf.temp.map(|c| format!("{c:.0} \u{00B0}C")).unwrap_or_default();
     if m.gpu_adapters.is_empty() || m.offline {
         ui.title_r(&head(m, "popup.gpu"), &sub(m, &m.gpu_name), &temp);
     } else {

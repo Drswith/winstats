@@ -147,7 +147,7 @@ fn query(index: u32) -> Option<PhysicalDisk> {
             let model = if vendor.is_empty() || product.starts_with(&vendor) { product } else { format!("{vendor} {product}") };
             let firmware = cstr_at(&buf, d.ProductRevisionOffset);
             // some drivers pad the serial with spaces or dots, a few return it hex-encoded
-            let serial = cstr_at(&buf, d.SerialNumberOffset).trim_matches(|c: char| c == '.' || c.is_whitespace()).to_string();
+            let serial = clean_serial(&cstr_at(&buf, d.SerialNumberOffset));
             // IOCTL_DISK_GET_LENGTH_INFO needs read access (admin); the geometry query does not
             let mut geo = DISK_GEOMETRY_EX::default();
             let mut got2 = 0u32;
@@ -215,4 +215,35 @@ pub fn with_disabled(mut disks: Vec<PhysicalDisk>, disabled: &[String]) -> Vec<P
 /// All physical drives 0..32 that answer (indices can have gaps after hot-unplugs).
 pub fn enumerate() -> Vec<PhysicalDisk> {
     (0..32u32).filter_map(query).collect()
+}
+
+/// Serial as the drive reports it, without padding. Older storage drivers (Windows 7 AHCI)
+/// hand out the ATA serial as hex text of its byte-swapped characters: "32534a42..." for
+/// "S2BJ...". That is decoded back when it is clearly hex and decodes to printable text.
+fn clean_serial(raw: &str) -> String {
+    let t = raw.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if t.len() >= 16 && t.len() % 4 == 0 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+        let bytes: Option<Vec<u8>> = (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).ok()).collect();
+        if let Some(mut b) = bytes {
+            for pair in b.chunks_mut(2) {
+                pair.swap(0, 1);
+            }
+            if b.iter().all(|c| (0x20..0x7F).contains(c)) {
+                return String::from_utf8_lossy(&b).trim().to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
+#[cfg(test)]
+mod serial_tests {
+    use super::clean_serial;
+
+    #[test]
+    fn hex_serials_decode() {
+        assert_eq!(clean_serial("2020202057202d44435752413157323035363032"), "WD-WCARW1026520");
+        assert_eq!(clean_serial("  50026B77844A4BED  "), "50026B77844A4BED");
+        assert_eq!(clean_serial("S4500105...."), "S4500105");
+    }
 }

@@ -2,6 +2,7 @@
 
 mod canvas;
 mod config;
+mod diag;
 mod i18n;
 mod menu;
 mod metrics;
@@ -206,6 +207,12 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn main() {
+    // `--diag [file]`: dump what every metric source returns and exit (no window, no config)
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--diag") {
+        diag::run(args.get(i + 1).map(String::as_str).unwrap_or("winstats-diag.txt"));
+        return;
+    }
     let first_run = !Config::path().exists();
     let mut cfg = Config::load();
     let keys = remote_keys(&cfg);
@@ -1516,66 +1523,68 @@ unsafe fn build_menu(st: &MenuState) -> Option<HMENU> {
             menu_submenu(menu, rm, &if any { format!("{}  \u{2022}", t("menu.remote")) } else { t("menu.remote") });
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        menu_item(menu, MENU_LABELS, &t("menu.labels"), cfg.labels);
+        // appearance and behaviour in one submenu
+        let settings = CreatePopupMenu().ok()?;
+        menu_item(settings, MENU_LABELS, &t("menu.labels"), cfg.labels);
 
         let accent = CreatePopupMenu().ok()?;
         for (i, (name, title, c)) in widgets::PALETTE.iter().enumerate() {
             menu_color_item(accent, MENU_ACCENT_BASE + i, &t(title), cfg.accent == *name, palette_color(name, *c), dpi);
         }
-        menu_submenu(menu, accent, &t("menu.accent_colour"));
+        menu_submenu(settings, accent, &t("menu.accent_colour"));
 
         let font = CreatePopupMenu().ok()?;
         for (i, (scale, title)) in FONT_SIZES.iter().enumerate() {
             menu_item(font, MENU_FONT_BASE + i, &t(title), (cfg.font_scale - scale).abs() < 0.01);
         }
-        menu_submenu(menu, font, &t("menu.font_size"));
+        menu_submenu(settings, font, &t("menu.font_size"));
 
         let chart = CreatePopupMenu().ok()?;
         for (i, (w, title)) in CHART_WIDTHS.iter().enumerate() {
             menu_item(chart, MENU_CHART_BASE + i, &t(title), cfg.chart_width == *w);
         }
-        menu_submenu(menu, chart, &t("menu.chart_width"));
+        menu_submenu(settings, chart, &t("menu.chart_width"));
 
         let bars = CreatePopupMenu().ok()?;
         for (i, (name, _, title)) in widgets::BAR_WIDTHS.iter().enumerate() {
             menu_item(bars, MENU_BAR_BASE + i, &t(title), cfg.bar_width == *name);
         }
-        menu_submenu(menu, bars, &t("menu.bar_width"));
+        menu_submenu(settings, bars, &t("menu.bar_width"));
 
         let top = CreatePopupMenu().ok()?;
         for (i, n) in TOP_COUNTS.iter().enumerate() {
             menu_item(top, MENU_TOP_BASE + i, &n.to_string(), cfg.top_processes == *n);
         }
-        menu_submenu(menu, top, &t("menu.top_processes"));
+        menu_submenu(settings, top, &t("menu.top_processes"));
 
         let pos = CreatePopupMenu().ok()?;
         menu_item(pos, MENU_POS_RIGHT, &t("menu.pos_right"), cfg.position != "left");
         menu_item(pos, MENU_POS_LEFT, &t("menu.pos_left"), cfg.position == "left");
-        menu_submenu(menu, pos, &t("menu.position"));
+        menu_submenu(settings, pos, &t("menu.position"));
 
         let interval = CreatePopupMenu().ok()?;
         for (i, (ms, title)) in INTERVALS.iter().enumerate() {
             menu_item(interval, MENU_INTERVAL_BASE + i, title, cfg.update_ms == *ms);
         }
-        menu_submenu(menu, interval, &t("menu.update_interval"));
+        menu_submenu(settings, interval, &t("menu.update_interval"));
 
         let proc_interval = CreatePopupMenu().ok()?;
         for (i, (ms, title)) in INTERVALS.iter().enumerate() {
             menu_item(proc_interval, MENU_PROC_INTERVAL_BASE + i, title, cfg.proc_update_ms == *ms);
         }
-        menu_submenu(menu, proc_interval, &t("menu.proc_interval"));
+        menu_submenu(settings, proc_interval, &t("menu.proc_interval"));
 
         let theme = CreatePopupMenu().ok()?;
         menu_item(theme, MENU_THEME_AUTO, &t("menu.theme_auto"), cfg.theme == "auto");
         menu_item(theme, MENU_THEME_DARK, &t("menu.theme_dark"), cfg.theme == "dark");
         menu_item(theme, MENU_THEME_LIGHT, &t("menu.theme_light"), cfg.theme == "light");
-        menu_submenu(menu, theme, &t("menu.theme"));
+        menu_submenu(settings, theme, &t("menu.theme"));
 
         let opacity = CreatePopupMenu().ok()?;
         for (i, (value, key)) in POPUP_OPACITY.iter().enumerate() {
             menu_item(opacity, MENU_OPACITY_BASE + i, &t(key), cfg.popup_opacity == *value);
         }
-        menu_submenu(menu, opacity, &t("menu.popup_opacity"));
+        menu_submenu(settings, opacity, &t("menu.popup_opacity"));
 
         let lang = CreatePopupMenu().ok()?;
         menu_item(lang, MENU_LANG_BASE, &t("menu.lang_system"), cfg.language == "auto");
@@ -1583,7 +1592,8 @@ unsafe fn build_menu(st: &MenuState) -> Option<HMENU> {
         for (i, (code, name, _)) in i18n::LOCALES.iter().enumerate() {
             menu_item(lang, MENU_LANG_BASE + 1 + i, name, cfg.language == *code);
         }
-        menu_submenu(menu, lang, &t("menu.language"));
+        menu_submenu(settings, lang, &t("menu.language"));
+        menu_submenu(menu, settings, &t("menu.settings"));
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         menu_item(menu, MENU_AUTOSTART, &t("menu.start_with_windows"), util::autostart_enabled());
