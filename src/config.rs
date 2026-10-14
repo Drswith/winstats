@@ -53,6 +53,8 @@ pub struct Config {
     pub net_unit: String,
     /// Physical disks (by model) left out of the widget and the chart.
     pub disks_disabled: Vec<String>,
+    /// Video adapters (by name) left out of the GPU load; the popup shows the first enabled one.
+    pub gpu_disabled: Vec<String>,
     /// Series drawn in the network popup chart (clicking Download / Upload toggles them).
     pub net_chart_rx: bool,
     pub net_chart_tx: bool,
@@ -110,6 +112,7 @@ impl Default for Config {
             net_disabled: Vec::new(),
             net_unit: "bytes".into(),
             disks_disabled: Vec::new(),
+            gpu_disabled: Vec::new(),
             net_chart_rx: true,
             net_chart_tx: true,
             ping_host: "1.1.1.1".into(),

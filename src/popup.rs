@@ -43,6 +43,8 @@ pub enum Action {
     ToggleNet(String),
     /// include / exclude a physical disk (by model)
     ToggleDisk(String),
+    /// a video adapter row: count it in the GPU load or not (by adapter name)
+    ToggleGpu(String),
     /// pin a process row (its icon becomes a kill button); the index is the row in the list
     LockProc(usize, crate::metrics::processes::ProcInfo),
     /// terminate the process
@@ -1194,12 +1196,31 @@ fn draw_mem(ui: &mut Ui, m: &MetricsData) {
 }
 
 fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
-    ui.title(&head(m, "popup.gpu"), &sub(m, &m.gpu_name));
+    // like the CPU popup: the temperature after the name, only when the driver reports it
+    let mut line = m.gpu_name.clone();
+    if let Some(c) = m.gpu_perf.temp {
+        if !line.is_empty() {
+            line.push_str(" · ");
+        }
+        line.push_str(&format!("{c:.0} \u{00B0}C"));
+    }
+    ui.title(&head(m, "popup.gpu"), &sub(m, &line));
     let hist: Vec<f32> = m.gpu_history.iter().cloned().collect();
     ui.chart(&hist, 70.0, ui.t.accent);
     match m.gpu {
         Some(v) => ui.row_colored(&t("popup.load"), &pct(v), ui.t.usage(v, ui.t.text)),
         None => ui.row(&t("popup.load"), &t("popup.na")),
+    }
+    // whatever the driver reports (D3DKMT perf data); missing ones are left out
+    let p = m.gpu_perf;
+    if let Some(mhz) = p.core_mhz {
+        ui.row(&t("popup.clock"), &format!("{mhz} MHz"));
+    }
+    if let Some(mhz) = p.mem_mhz {
+        ui.row(&t("popup.mem_clock"), &format!("{mhz} MHz"));
+    }
+    if let Some(v) = p.power {
+        ui.row(&t("popup.power"), &tf("popup.power_budget", &[("pct", &pct(v))]));
     }
     if m.vram_budget > 0 {
         let frac = m.vram_used as f32 / m.vram_budget as f32;
@@ -1222,7 +1243,18 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
     if m.gpu_adapters.len() > 1 {
         ui.section(&t("popup.all_adapters"));
         for a in &m.gpu_adapters {
-            ui.row(&a.name, &if a.dedicated > 0 { format_bytes(a.dedicated) } else { t("popup.shared") });
+            // "12% · 5.9 GB"; a click counts the adapter in the load or leaves it out
+            let mut parts: Vec<String> = Vec::new();
+            if let (Some(v), true) = (a.load, m.gpu_available) {
+                parts.push(pct(v));
+            }
+            parts.push(if a.dedicated > 0 { format_bytes(a.dedicated) } else { t("popup.shared") });
+            let value = parts.join(" · ");
+            let start = ui.y;
+            ui.row_lv(&a.name, &value, ui.on_off(ui.t.text, a.enabled), ui.on_off(ui.t.dim, a.enabled));
+            if m.host.is_empty() {
+                ui.clickable(start, Action::ToggleGpu(a.name.clone()));
+            }
         }
     }
 }

@@ -18,8 +18,9 @@ pub struct Pdh {
     cpu_base: Option<isize>,
     pub disk_read_bps: f64,
     pub disk_write_bps: f64,
-    /// None when GPU counters are unavailable (VMs, old drivers).
-    pub gpu_pct: Option<f32>,
+    /// Per adapter LUID: the busiest engine type in 0..1; empty when the GPU counters are
+    /// unavailable (VMs, old drivers).
+    pub gpu_loads: HashMap<u64, f32>,
 }
 
 impl Pdh {
@@ -45,7 +46,7 @@ impl Pdh {
                 crate::log!("GPU Engine counters unavailable; gpu widget will show --");
             }
             let _ = PdhCollectQueryData(query);
-            Some(Self { query, disk_read, disk_write, gpu, disk_read_all, disk_write_all, cpu_perf, cpu_base, disk_read_bps: 0.0, disk_write_bps: 0.0, gpu_pct: None })
+            Some(Self { query, disk_read, disk_write, gpu, disk_read_all, disk_write_all, cpu_perf, cpu_base, disk_read_bps: 0.0, disk_write_bps: 0.0, gpu_loads: HashMap::new() })
         }
     }
 
@@ -125,8 +126,9 @@ impl Pdh {
         if r == 0 { Some(unsafe { v.Anonymous.doubleValue }) } else { None }
     }
 
-    /// Task Manager style: sum utilisation per engine type, report the busiest engine type.
-    fn gpu_value(counter: isize) -> Option<f32> {
+    /// Task Manager style, per adapter: sum utilisation per engine type, report the busiest one.
+    /// Instances look like "pid_1234_luid_0x00000000_0x0000D1C9_phys_0_eng_3_engtype_3D".
+    fn gpu_values(counter: isize) -> Option<HashMap<u64, f32>> {
         unsafe {
             let mut size = 0u32;
             let mut count = 0u32;
@@ -141,17 +143,22 @@ impl Pdh {
                 return None;
             }
             let slice = std::slice::from_raw_parts(items, count as usize);
-            let mut per_type: HashMap<String, f64> = HashMap::new();
+            let mut per_type: HashMap<(u64, String), f64> = HashMap::new();
             for it in slice {
                 if it.FmtValue.CStatus != 0 {
                     continue;
                 }
                 let name = it.szName.to_string().unwrap_or_default();
                 let engtype = name.rsplit("engtype_").next().unwrap_or("").to_string();
-                *per_type.entry(engtype).or_default() += it.FmtValue.Anonymous.doubleValue;
+                *per_type.entry((luid_of(&name), engtype)).or_default() += it.FmtValue.Anonymous.doubleValue;
             }
-            per_type.values().cloned().fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
-                .map(|v| (v / 100.0).clamp(0.0, 1.0) as f32)
+            let mut out: HashMap<u64, f32> = HashMap::new();
+            for ((luid, _), v) in per_type {
+                let v = (v / 100.0).clamp(0.0, 1.0) as f32;
+                let e = out.entry(luid).or_insert(0.0);
+                *e = e.max(v);
+            }
+            Some(out)
         }
     }
 
@@ -168,8 +175,21 @@ impl Pdh {
             self.disk_write_bps = v;
         }
         if let Some(g) = self.gpu {
-            self.gpu_pct = Self::gpu_value(g).or(self.gpu_pct);
+            if let Some(v) = Self::gpu_values(g) {
+                self.gpu_loads = v;
+            }
         }
+    }
+}
+
+/// The adapter LUID in a GPU Engine instance name ("..._luid_0xHIGH_0xLOW_..."); 0 if absent.
+fn luid_of(name: &str) -> u64 {
+    let Some(rest) = name.split("luid_").nth(1) else { return 0 };
+    let mut parts = rest.split('_');
+    let hex = |p: Option<&str>| p.and_then(|p| u32::from_str_radix(p.trim_start_matches("0x"), 16).ok());
+    match (hex(parts.next()), hex(parts.next())) {
+        (Some(hi), Some(lo)) => (hi as u64) << 32 | lo as u64,
+        _ => 0,
     }
 }
 

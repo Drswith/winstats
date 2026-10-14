@@ -270,6 +270,7 @@ fn main() {
     };
 
     let mut metrics = Metrics::new(&cfg.disk, cfg.top_processes as usize, &cfg.net_disabled, &cfg.disks_disabled);
+    metrics.set_gpu_disabled(&cfg.gpu_disabled);
     metrics.set_group_pe(cfg.group_pe_cores);
     if first_run {
         // do not start with widgets this machine cannot feed
@@ -934,6 +935,7 @@ impl App {
         i18n::set_language(&self.cfg.language);
         self.widgets = widgets::build(&self.cfg.widgets);
         self.metrics = Metrics::new(&self.cfg.disk, self.cfg.top_processes as usize, &self.cfg.net_disabled, &self.cfg.disks_disabled);
+        self.metrics.set_gpu_disabled(&self.cfg.gpu_disabled);
         self.metrics.set_group_pe(self.cfg.group_pe_cores);
         self.apply_share();
         unsafe {
@@ -1802,6 +1804,15 @@ impl App {
                 }
                 toggle(&mut self.cfg.disks_disabled, model);
                 self.metrics.set_disks_disabled(&self.cfg.disks_disabled);
+            }
+            popup::Action::ToggleGpu(name) => {
+                let last = self.metrics.gpu_adapters.iter().filter(|a| a.enabled).count() <= 1
+                    && self.metrics.gpu_adapters.iter().any(|a| a.enabled && a.name == name);
+                if last {
+                    return;
+                }
+                toggle(&mut self.cfg.gpu_disabled, name);
+                self.metrics.set_gpu_disabled(&self.cfg.gpu_disabled);
             }
             _ => return,
         }

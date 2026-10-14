@@ -3,6 +3,7 @@ pub mod cpu;
 pub mod disks;
 pub mod drives;
 pub mod gpu;
+pub mod gpuperf;
 pub mod mem;
 pub mod net;
 pub mod ping;
@@ -65,6 +66,8 @@ pub struct MetricsData {
     pub gpu_name: String,
     pub gpu_adapters: Vec<gpu::AdapterInfo>,
     pub gpu_primary: Option<gpu::AdapterInfo>,
+    /// temperature, clocks and power of the primary adapter (popup only), where reported
+    pub gpu_perf: gpuperf::Perf,
     /// physical disks with model/bus/size; rates filled while the popup is open
     pub disks: Vec<disks::PhysicalDisk>,
     pub mem_modules: Vec<smbios::MemModule>,
@@ -189,7 +192,7 @@ impl Metrics {
     pub fn new(disk_letter: &str, top_n: usize, net_disabled: &[String], disks_disabled: &[String]) -> Self {
         let cpu = cpu::Cpu::new();
         let cores = cpu.cores.len();
-        let gpu_dev = gpu::Gpu::new();
+        let gpu_dev = gpu::Gpu::new(&[]);
         let pdh = pdh::Pdh::new();
         let gpu_available = pdh.as_ref().map(|p| p.gpu_available()).unwrap_or(false);
         let battery_available = battery::read().is_some();
@@ -251,6 +254,18 @@ impl Metrics {
         self.data.net_ifaces = self.net.ifaces.clone();
     }
 
+    pub fn set_gpu_disabled(&mut self, disabled: &[String]) {
+        self.gpu_dev.set_disabled(disabled);
+        let d = &mut self.data;
+        d.gpu_name = self.gpu_dev.name.clone();
+        d.gpu_adapters = self.gpu_dev.adapters.clone();
+        d.gpu_primary = self.gpu_dev.primary().cloned();
+        d.gpu_perf = self.gpu_dev.primary().map(|a| a.perf).unwrap_or_default();
+        d.vram_total = self.gpu_dev.vram_total;
+        d.vram_used = self.gpu_dev.vram_used;
+        d.vram_budget = self.gpu_dev.vram_budget;
+    }
+
     pub fn set_disks_disabled(&mut self, disabled: &[String]) {
         self.data.disks = disks::with_disabled(std::mem::take(&mut self.data.disks), disabled);
     }
@@ -285,6 +300,9 @@ impl Metrics {
         d.net_ip = self.net.iface_ip.clone();
         d.net_ifaces = self.net.ifaces.clone();
         self.gpu_dev.update();
+        self.gpu_dev.update_perf();
+        d.gpu_perf = self.gpu_dev.primary().map(|a| a.perf).unwrap_or_default();
+        d.gpu_adapters = self.gpu_dev.adapters.clone();
         d.vram_used = self.gpu_dev.vram_used;
         d.vram_budget = self.gpu_dev.vram_budget;
         d.drives = drives::list();
@@ -321,7 +339,8 @@ impl Metrics {
 
         if let Some(p) = self.pdh.as_mut() {
             p.update();
-            d.gpu = p.gpu_pct;
+            d.gpu = self.gpu_dev.set_loads(&p.gpu_loads);
+            d.gpu_adapters = self.gpu_dev.adapters.clone();
             let raw = p.core_freqs();
             d.cpu_freq = if raw.len() >= self.cpu_order.len() { self.cpu_order.iter().map(|&i| raw.get(i).cloned().unwrap_or(0)).collect() } else { Vec::new() };
             if self.want_per_disk || d.disks.iter().any(|disk| !disk.enabled) {
