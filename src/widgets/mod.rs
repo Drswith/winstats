@@ -105,7 +105,7 @@ impl Theme {
             ColorMode::Accent => self.accent,
             ColorMode::Utilization => self.usage(v, self.accent),
             ColorMode::Mono => self.text,
-            ColorMode::Fixed(c) => c,
+            ColorMode::Fixed(c) => readable(c, self.light),
         }
     }
 
@@ -756,5 +756,19 @@ impl Widget for BatteryWidget {
         let inner = bw - 4;
         let fw = ((inner as f32) * b.level).round().max(1.0) as i32;
         c.fill_rect(bx + 2, by + 2, fw, bh - 4, fill_col);
+    }
+}
+
+/// `c` shifted until it stands out from the background: a near-white colour on a light
+/// background turns dark grey, a near-black one on a dark background light grey; anything with
+/// enough contrast is kept as chosen.
+pub fn readable(c: Color, light_bg: bool) -> Color {
+    let lum = (0.2126 * c.r as f32 + 0.7152 * c.g as f32 + 0.0722 * c.b as f32) / 255.0;
+    if light_bg && lum > 0.8 {
+        Color::rgba(0x50, 0x50, 0x50, c.a)
+    } else if !light_bg && lum < 0.15 {
+        Color::rgba(0xB0, 0xB0, 0xB0, c.a)
+    } else {
+        c
     }
 }

@@ -1289,15 +1289,18 @@ fn draw_cpu(ui: &mut Ui, m: &MetricsData) {
             .map(|(p, name)| {
                 let loads: Vec<f32> = m.cpu_cores.iter().zip(&m.cpu_packages).filter(|(_, &k)| k as usize == p).map(|(v, _)| *v).collect();
                 let load = if loads.is_empty() { String::new() } else { pct(loads.iter().sum::<f32>() / loads.len() as f32) };
-                (name.clone(), load, ui.t.dim, None)
+                (name.clone(), load, ui.t.text, None)
             })
             .collect();
         ui.title_list(&head(m, "popup.cpus"), &temp, &lines);
-    } else {
+    } else if m.offline || m.cpu_name.is_empty() {
         ui.title_r(&head(m, "popup.cpu"), &sub(m, &m.cpu_name), &temp);
+    } else {
+        // the model in full text colour with the temperature on its line, as the GPU popup does
+        ui.title_list(&head(m, "popup.cpu"), "", &[(m.cpu_name.clone(), temp, ui.t.text, None)]);
     }
     let hist: Vec<f32> = m.cpu_history.iter().cloned().collect();
-    ui.chart(&hist, 70.0, ui.t.accent);
+    ui.chart(&hist, 70.0, ui.t.chart_color(Kind::Cpu, 0.0));
     ui.row_colored(&t("popup.load"), &pct(m.cpu_total), ui.t.usage(m.cpu_total, ui.t.text));
     // kernel / programs in one line: who is busy
     ui.row(&format!("{} / {}", t("popup.system"), t("popup.user")), &format!("{} / {}", pct(m.cpu_system), pct(m.cpu_user)));
@@ -1404,7 +1407,7 @@ fn draw_mem(ui: &mut Ui, m: &MetricsData) {
     }
     ui.title(&head(m, "popup.memory"), &sub(m, &line));
     let hist: Vec<f32> = m.mem_history.iter().cloned().collect();
-    ui.chart(&hist, 70.0, ui.t.accent);
+    ui.chart(&hist, 70.0, ui.t.chart_color(Kind::Mem, 0.0));
     ui.row_colored(&t("popup.usage"), &pct(m.mem.pct), ui.t.usage(m.mem.pct, ui.t.text));
     ui.row(&t("popup.used"), &format_bytes(m.mem.used));
     ui.row(&t("popup.free"), &format_bytes(m.mem.total.saturating_sub(m.mem.used)));
@@ -1461,7 +1464,7 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
         ui.title_list(&head(m, key), "", &lines);
     }
     let hist: Vec<f32> = m.gpu_history.iter().cloned().collect();
-    ui.chart(&hist, 70.0, ui.t.accent);
+    ui.chart(&hist, 70.0, ui.t.chart_color(Kind::Gpu, 0.0));
     match m.gpu {
         Some(v) => ui.row_colored(&t("popup.load"), &pct(v), ui.t.usage(v, ui.t.text)),
         None => ui.row(&t("popup.load"), &t("popup.na")),
@@ -1475,7 +1478,7 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
     // whatever the driver reports (D3DKMT perf data); missing ones are left out
     let p = m.gpu_perf;
     if let Some(mhz) = p.core_mhz {
-        ui.row(&t("popup.clock"), &format!("{mhz} {}", unit("mhz")));
+        ui.row(&t("popup.clock"), &clock_now_max(mhz, p.core_max_mhz));
     }
     match (p.power_w, p.power_limit_w, p.power) {
         (Some(w), Some(l), _) => ui.row(&t("popup.power"), &format!("{w:.0} / {l:.0} {}", unit("w"))),
@@ -1493,7 +1496,7 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
     let more = ui.expanded.contains("more:gpu");
     if more {
         if let Some(mhz) = p.mem_mhz {
-            ui.row(&t("popup.mem_clock"), &format!("{mhz} {}", unit("mhz")));
+            ui.row(&t("popup.mem_clock"), &clock_now_max(mhz, p.mem_max_mhz));
         }
         match (p.fan_pct, p.fan_rpm) {
             (Some(f), Some(r)) => ui.row(&t("popup.fan"), &format!("{f}% · {r} {}", unit("rpm"))),
@@ -1565,6 +1568,15 @@ fn adapter_mem(a: &crate::metrics::gpu::AdapterInfo) -> String {
         parts.push(format!("{} {}", t("popup.shared"), format_bytes(u)));
     }
     parts.join(" \u{00B7} ")
+}
+
+/// "1100 / 1366 MHz": the current clock and the card's maximum where known (the GPU drops to its
+/// lowest step at idle, so the current one alone says little).
+fn clock_now_max(now: u32, max: Option<u32>) -> String {
+    match max.filter(|m| *m > 0) {
+        Some(m) => format!("{now} / {m} {}", unit("mhz")),
+        None => format!("{now} {}", unit("mhz")),
+    }
 }
 
 fn draw_net(ui: &mut Ui, m: &MetricsData) {

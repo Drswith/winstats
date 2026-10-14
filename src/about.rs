@@ -101,11 +101,11 @@ impl About {
         self.canvas.draw_text("\u{2715}", cx, cy, cf, t.dim);
         self.links.push((RECT { left: cx - t.s(8.0), top: cy - t.s(8.0), right: cx + cw + t.s(8.0), bottom: cy + ch + t.s(8.0) }, ""));
 
-        // logo: rounded square in the accent colour with white core bars
+        // logo: rounded square in the brand blue (an accent can be white) with white core bars
         let logo = t.s(64.0);
         let lx = (w - logo) / 2;
         let ly = t.s(26.0);
-        self.canvas.fill_round_rect(lx, ly, logo, logo, t.s(14.0) as f32, t.accent);
+        self.canvas.fill_round_rect(lx, ly, logo, logo, t.s(14.0) as f32, crate::widgets::BLUE);
         // centred group of bars with chart-like, uneven levels
         let bars = [0.45f32, 0.8, 0.35, 0.95, 0.6, 0.25, 0.7];
         let pad = t.s(12.0);
@@ -144,15 +144,17 @@ impl About {
         let rc = centred(&mut self.canvas, &crate::i18n::t("about.license"), lf, t.accent, &mut y);
         self.links.push((pad_rect(rc, t.s(6.0)), LICENSE_URL));
 
-        // centre on the primary monitor
+        // in the corner by the taskbar of the primary monitor, where the popups open: the work
+        // area leaves the taskbar out, so its edge that differs from the monitor's is the taskbar
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let mon = unsafe {
+        let (mon, work) = unsafe {
             let hm = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTOPRIMARY);
             let _ = GetMonitorInfoW(hm, &mut mi);
-            mi.rcWork
+            (mi.rcMonitor, mi.rcWork)
         };
-        let x = mon.left + (mon.right - mon.left - w) / 2;
-        let yy = mon.top + (mon.bottom - mon.top - h) / 2;
+        let margin = t.s(8.0);
+        let x = if work.left > mon.left { work.left + margin } else { work.right - w - margin };
+        let yy = if work.top > mon.top { work.top + margin } else { work.bottom - h - margin };
         unsafe {
             let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, x, yy, w, h, SWP_SHOWWINDOW);
             if let Err(e) = self.canvas.present_at(self.hwnd, x, yy) {

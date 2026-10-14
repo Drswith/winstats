@@ -119,6 +119,29 @@ type FnPower6 = unsafe extern "C" fn(Context, i32, i32, *mut i32) -> i32;
 type FnTempN = unsafe extern "C" fn(Context, i32, i32, *mut i32) -> i32;
 type FnStatusN = unsafe extern "C" fn(Context, i32, *mut OdnStatus) -> i32;
 type FnFanN = unsafe extern "C" fn(Context, i32, *mut OdnFan) -> i32;
+/// ADL2_OverdriveN_SystemClocks_Get / _MemoryClocks_Get: the DPM levels (ADLODNPerformanceLevels)
+type FnLevelsN = unsafe extern "C" fn(Context, i32, *mut OdnLevels) -> i32;
+
+/// ADLODNPerformanceLevels with room for 16 levels of (clock in 10 kHz, voltage, enabled)
+#[repr(C)]
+struct OdnLevels {
+    size: i32,
+    mode: i32,
+    count: i32,
+    levels: [[i32; 3]; 16],
+}
+
+impl OdnLevels {
+    fn new() -> Self {
+        Self { size: std::mem::size_of::<Self>() as i32, mode: 0, count: 16, levels: [[0; 3]; 16] }
+    }
+
+    /// The top enabled level, MHz: the stock boost clock.
+    fn max_mhz(&self) -> Option<u32> {
+        let n = (self.count.clamp(0, 16)) as usize;
+        self.levels[..n].iter().filter(|l| l[2] != 0 && l[0] > 0 && l[0] < 5_000_000).map(|l| (l[0] / 100) as u32).max()
+    }
+}
 
 /// ADL hands out memory through this callback; the few small blocks are never freed.
 unsafe extern "system" fn adl_malloc(size: i32) -> *mut core::ffi::c_void {
@@ -138,6 +161,8 @@ pub struct Amd {
     temp_n: Option<FnTempN>,
     status_n: Option<FnStatusN>,
     fan_n: Option<FnFanN>,
+    core_levels_n: Option<FnLevelsN>,
+    mem_levels_n: Option<FnLevelsN>,
     /// (PCI bus, ADL adapter index, Overdrive version)
     gpus: Vec<(i32, i32, i32)>,
 }
@@ -209,6 +234,8 @@ impl Amd {
                 temp_n: sym(lib, b"ADL2_OverdriveN_Temperature_Get\0"),
                 status_n: sym(lib, b"ADL2_OverdriveN_PerformanceStatus_Get\0"),
                 fan_n: sym(lib, b"ADL2_OverdriveN_FanControl_Get\0"),
+                core_levels_n: sym(lib, b"ADL2_OverdriveN_SystemClocks_Get\0"),
+                mem_levels_n: sym(lib, b"ADL2_OverdriveN_MemoryClocks_Get\0"),
                 gpus,
             })
         }
@@ -239,8 +266,12 @@ impl Amd {
                 }
             }
             if let Some(f) = self.power6 {
-                let mut v = 0;
-                out += &format!("od6 power: rc {} value {}\n", f(ctx, idx, 0, &mut v), v);
+                // 0 total, 1 PPT, 2 socket, 3 chip (ADLODNCurrentPowerType); value in 1/256 W
+                for kind in 0..4 {
+                    let mut v = 0;
+                    let rc = f(ctx, idx, kind, &mut v);
+                    out += &format!("od6 power {kind}: rc {rc} value {v} = {:.1} W\n", v as f32 / 256.0);
+                }
             }
             if let Some(f) = self.temp_n {
                 for kind in [ODN_EDGE, ODN_HOTSPOT] {
@@ -256,6 +287,14 @@ impl Amd {
             if let Some(f) = self.fan_n {
                 let mut s = OdnFan::default();
                 out += &format!("odn fan: rc {} mode {} speed {}\n", f(ctx, idx, &mut s), s.speed_mode, s.speed);
+            }
+            for (name, f) in [("core", self.core_levels_n), ("memory", self.mem_levels_n)] {
+                if let Some(f) = f {
+                    let mut l = OdnLevels::new();
+                    let rc = f(ctx, idx, &mut l);
+                    let n = l.count.clamp(0, 16) as usize;
+                    out += &format!("odn {name} levels: rc {rc} count {} {:?} max {:?}\n", l.count, &l.levels[..n], l.max_mhz());
+                }
             }
         }
         out
@@ -303,11 +342,19 @@ impl Amd {
                     if f(ctx, idx, &mut s) == 0 {
                         // 10 kHz units
                         let mhz = |v: i32| (v > 0 && v < 5_000_000).then(|| (v / 100) as u32);
+                        // the top of the clock tables is the maximum, beside the current one
+                        let top = |f: Option<FnLevelsN>| -> Option<u32> {
+                            let f = f?;
+                            let mut l = OdnLevels::new();
+                            (f(ctx, idx, &mut l) == 0).then(|| l.max_mhz()).flatten()
+                        };
                         if p.core_mhz.is_none() {
                             p.core_mhz = mhz(s.core_clock);
+                            p.core_max_mhz = top(self.core_levels_n);
                         }
                         if p.mem_mhz.is_none() {
                             p.mem_mhz = mhz(s.memory_clock);
+                            p.mem_max_mhz = top(self.mem_levels_n);
                         }
                         if p.pcie_width.is_none() && (1..=32).contains(&s.bus_lanes) {
                             p.pcie_width = Some(s.bus_lanes as u32);

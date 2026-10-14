@@ -25,6 +25,10 @@ pub struct Perf {
     pub core_mhz: Option<u32>,
     /// memory clock, MHz
     pub mem_mhz: Option<u32>,
+    /// the highest engine / memory clock the card runs at (stock boost), MHz; from the same
+    /// source as the current one
+    pub core_max_mhz: Option<u32>,
+    pub mem_max_mhz: Option<u32>,
     /// share of the power budget, 0..1
     pub power: Option<f32>,
     /// board power and its enforced limit, W (vendor libraries)
@@ -153,6 +157,7 @@ impl GpuPerf {
             let c = a.temperature as f32 / 10.0;
             perf.temp = (c > 0.0 && c < 150.0).then_some(c);
             perf.mem_mhz = mhz(a.memory_frequency);
+            perf.mem_max_mhz = mhz(a.max_memory_frequency);
             perf.power = (a.power > 0 && a.power <= 2000).then_some(a.power as f32 / 1000.0);
             perf.fan_rpm = (a.fan_rpm > 0 && a.fan_rpm < 20_000).then_some(a.fan_rpm);
             // the bandwidth fields count bytes moved so far: a rate needs two reads
@@ -173,6 +178,7 @@ impl GpuPerf {
         let mut n = NodePerfData::default();
         if self.query(adapter, KMTQAITYPE_NODEPERFDATA, &mut n) {
             perf.core_mhz = mhz(n.frequency);
+            perf.core_max_mhz = mhz(n.max_frequency);
         }
         perf
     }

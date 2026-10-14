@@ -446,9 +446,25 @@ impl App {
         }
     }
 
+    /// The strip sits on the taskbar: light only where the taskbar can be light. Windows 7 has
+    /// no light taskbar (Aero glass, the blue Basic one), so there the theme setting is for the
+    /// popups only.
+    fn strip_light(&self) -> bool {
+        self.is_light() && !util::is_windows7()
+    }
+
+    /// Colours for the strip.
     fn theme(&self) -> Theme {
+        self.theme_for(self.strip_light())
+    }
+
+    /// Colours for the popups and the about box: the theme setting as chosen.
+    fn popup_theme(&self) -> Theme {
+        self.theme_for(self.is_light())
+    }
+
+    fn theme_for(&self, light: bool) -> Theme {
         let tb = self.taskbar.as_ref().unwrap();
-        let light = self.is_light();
         let scale = tb.dpi() as f32 / 96.0;
         // widget row: the taskbar's thickness; a vertical taskbar is wide (it shows labels), so
         // there the row is 48 DIP like an ordinary taskbar
@@ -470,7 +486,8 @@ impl App {
         Theme {
             text,
             dim,
-            accent: self.cfg.accent_color(),
+            // a colour too close to the background (white on light, black on dark) is shifted
+            accent: widgets::readable(self.cfg.accent_color(), light),
             light,
             scale,
             inner_h: ((h as f32) * 0.55).round() as i32,
@@ -506,7 +523,7 @@ impl App {
     /// Draw the popup from whichever machine it shows.
     fn render_popup(&mut self, first: bool) {
         let light = self.is_light();
-        let theme = self.theme();
+        let theme = self.popup_theme();
         match self.popup.source.clone() {
             None => self.popup.render(&theme, light, &self.metrics, first),
             Some(key) => {
@@ -700,7 +717,7 @@ impl App {
         if let Some(d) = self.drag.as_ref().filter(|d| d.active) {
             // dim the dragged widget and mark the insertion slot nearest to the pointer
             if let Some((_, _, x0, x1, q0, q1)) = self.layout.iter().find(|(i, ..)| *i == d.widget) {
-                let bg = if self.is_light() { Color::rgba(255, 255, 255, 140) } else { Color::rgba(0, 0, 0, 140) };
+                let bg = if self.strip_light() { Color::rgba(255, 255, 255, 140) } else { Color::rgba(0, 0, 0, 140) };
                 if vertical {
                     self.canvas.fill_rect(*q0 + gap / 2, *x0 + gap / 2, q1 - q0 - gap, x1 - x0 - gap, bg);
                 } else {
@@ -1732,7 +1749,7 @@ fn menu_command(cmd: u32) {
         MENU_ABOUT => {
             with_app(|app| {
                 app.popup.hide("about");
-                let theme = app.theme();
+                let theme = app.popup_theme();
                 let light = app.is_light();
                 app.about.show(&theme, light);
             });

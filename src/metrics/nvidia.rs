@@ -47,6 +47,7 @@ struct Nvml {
     fan: Option<FnU32>,
     temp: Option<FnKindU32>,
     clock: Option<FnKindU32>,
+    max_clock: Option<FnKindU32>,
     /// (PCI bus, device handle)
     devices: Vec<(u32, Device)>,
 }
@@ -125,6 +126,7 @@ impl Nvml {
                 fan: sym(lib, b"nvmlDeviceGetFanSpeed\0"),
                 temp: sym(lib, b"nvmlDeviceGetTemperature\0"),
                 clock: sym(lib, b"nvmlDeviceGetClockInfo\0"),
+                max_clock: sym(lib, b"nvmlDeviceGetMaxClockInfo\0"),
                 devices,
             })
         }
@@ -152,11 +154,14 @@ impl Nvml {
         if p.temp.is_none() {
             p.temp = kind(self.temp, NVML_TEMPERATURE_GPU).filter(|c| *c > 0 && *c < 150).map(|c| c as f32);
         }
+        let valid = |m: &u32| *m > 0 && *m < 50_000;
         if p.core_mhz.is_none() {
-            p.core_mhz = kind(self.clock, NVML_CLOCK_GRAPHICS).filter(|m| *m > 0 && *m < 50_000);
+            p.core_mhz = kind(self.clock, NVML_CLOCK_GRAPHICS).filter(valid);
+            p.core_max_mhz = kind(self.max_clock, NVML_CLOCK_GRAPHICS).filter(valid);
         }
         if p.mem_mhz.is_none() {
-            p.mem_mhz = kind(self.clock, NVML_CLOCK_MEM).filter(|m| *m > 0 && *m < 50_000);
+            p.mem_mhz = kind(self.clock, NVML_CLOCK_MEM).filter(valid);
+            p.mem_max_mhz = kind(self.max_clock, NVML_CLOCK_MEM).filter(valid);
         }
     }
 }
