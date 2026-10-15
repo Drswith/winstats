@@ -1,6 +1,7 @@
 # build output
 /target
 /dist
+/tmp
 
 # IDE / editor state
 .idea/

@@ -1345,6 +1345,22 @@ fn draw_cpu(ui: &mut Ui, m: &MetricsData) {
     if m.load_avg.len() == 3 {
         ui.row(&t("popup.load_avg"), &format!("{:.2} / {:.2} / {:.2}", m.load_avg[0], m.load_avg[1], m.load_avg[2]));
     }
+    // machine fans of an agent (single-board computers): "Fan  40% · 1490 RPM"
+    for (i, f) in m.fans.iter().enumerate() {
+        let label = if m.fans.len() > 1 { format!("{} {}", t("popup.fan"), i + 1) } else { t("popup.fan") };
+        let text = match (f.duty, f.rpm) {
+            (Some(d), Some(r)) => format!("{} · {r} {}", pct(d), unit("rpm")),
+            (Some(d), None) => pct(d),
+            (None, Some(r)) => format!("{r} {}", unit("rpm")),
+            _ => continue,
+        };
+        ui.row(&label, &text);
+    }
+    // what an agent's machine draws: "Power  12.4 W" (a Mac), "Power VDD_IN  7.2 W" (a Jetson)
+    for p in &m.power {
+        let label = if m.power.len() > 1 { format!("{} {}", t("popup.power"), p.id) } else { t("popup.power") };
+        ui.row(&label, &format!("{:.1} {}", p.w, unit("w")));
+    }
     // diagnostics and fixed facts fold away under "More"
     let more = ui.expanded.contains("more:cpu");
     if more {
@@ -1412,6 +1428,16 @@ fn draw_cpu(ui: &mut Ui, m: &MetricsData) {
     }
     let breaks = m.cpu_breaks();
     ui.cores(&m.cpu_cores, &m.cpu_classes, &breaks, &m.cpu_smt, &m.cpu_ids);
+    // a remote machine's system: "Ubuntu 24.04.3 LTS", the kernel, the architecture, the agent
+    let os = &m.os;
+    if !os.release.is_empty() || !os.kernel.is_empty() {
+        ui.section(&t("popup.os_section"));
+        for (key, v) in [("popup.os_release", &os.release), ("popup.kernel", &os.kernel), ("popup.arch", &os.arch), ("popup.agent", &os.agent)] {
+            if !v.is_empty() {
+                ui.row(&t(key), v);
+            }
+        }
+    }
     ui.proc_section(&t("popup.top_processes"), m.host.is_empty());
     ui.processes(&m.top_cpu, ProcMode::Cpu, m.top_n, m.host.is_empty());
 }
@@ -1504,8 +1530,8 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
         ui.row(&t("popup.mem_clock"), &clock_now_max(mhz, p.mem_max_mhz));
     }
     match (p.power_w, p.power_limit_w, p.power) {
-        (Some(w), Some(l), _) => ui.row(&t("popup.power"), &format!("{w:.0} / {l:.0} {}", unit("w"))),
-        (Some(w), None, _) => ui.row(&t("popup.power"), &format!("{w:.0} {}", unit("w"))),
+        (Some(w), Some(l), _) => ui.row(&t("popup.power"), &format!("{} / {l:.0} {}", watts(w), unit("w"))),
+        (Some(w), None, _) => ui.row(&t("popup.power"), &format!("{} {}", watts(w), unit("w"))),
         (None, _, Some(v)) => ui.row(&t("popup.power"), &tf("popup.power_budget", &[("pct", &pct(v))])),
         _ => {}
     }
@@ -1557,9 +1583,12 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
             ui.row(&t("popup.mem_bandwidth"), &format_bytes_rate(bw));
         }
         if let Some(a) = &m.gpu_primary {
-            let vendor = a.vendor();
-            let ids = format!("{:04X}:{:04X}", a.vendor_id, a.device_id);
-            ui.row(&t("popup.vendor_device"), &if vendor.is_empty() { ids } else { format!("{vendor} {ids}") });
+            // SoC GPUs of remote machines have no PCI ids
+            if a.vendor_id != 0 {
+                let vendor = a.vendor();
+                let ids = format!("{:04X}:{:04X}", a.vendor_id, a.device_id);
+                ui.row(&t("popup.vendor_device"), &if vendor.is_empty() { ids } else { format!("{vendor} {ids}") });
+            }
             if !a.driver.is_empty() {
                 ui.row(&t("popup.driver"), &a.driver);
             }
@@ -1578,10 +1607,12 @@ fn draw_gpu(ui: &mut Ui, m: &MetricsData) {
             ui.row(&t("popup.dedicated"), &format_bytes(m.vram_total));
         }
     }
-    // per-process GPU use: local only, and only where the GPU counters exist (Windows 10 1709+)
-    if m.host.is_empty() && m.gpu_available {
-        ui.proc_section(&t("popup.gpu_processes"), true);
-        ui.processes(&m.top_gpu, ProcMode::Gpu, m.top_n, true);
+    // per-process GPU use: where the GPU counters exist (Windows 10 1709+), or what an agent
+    // sends (Linux DRM fdinfo, NVML)
+    let local = m.host.is_empty();
+    if (local && m.gpu_available) || (!local && !m.top_gpu.is_empty()) {
+        ui.proc_section(&t("popup.gpu_processes"), local);
+        ui.processes(&m.top_gpu, ProcMode::Gpu, m.top_n, local);
     }
 }
 
@@ -1598,6 +1629,15 @@ fn adapter_mem(a: &crate::metrics::gpu::AdapterInfo) -> String {
         parts.push(format!("{} {}", t("popup.shared"), format_bytes(u)));
     }
     parts.join(" \u{00B7} ")
+}
+
+/// Watts without a fraction, but with one below 10 W (an SoC's GPU draws a fraction of a watt).
+fn watts(w: f32) -> String {
+    if w < 10.0 {
+        format!("{w:.1}")
+    } else {
+        format!("{w:.0}")
+    }
 }
 
 /// "1100 / 1366 MHz": the current clock and the card's maximum where known (the GPU drops to its
@@ -1768,7 +1808,7 @@ fn draw_disk(ui: &mut Ui, m: &MetricsData) {
 
 fn draw_battery(ui: &mut Ui, m: &MetricsData) {
     let Some(b) = m.battery else {
-        ui.title(&t("popup.battery"), &t("popup.no_battery"));
+        ui.title(&head(m, "popup.battery"), &sub(m, &t("popup.no_battery")));
         return;
     };
     let state = if b.charging {
@@ -1778,7 +1818,7 @@ fn draw_battery(ui: &mut Ui, m: &MetricsData) {
     } else {
         t("popup.discharging")
     };
-    ui.title(&t("popup.battery"), &state);
+    ui.title(&head(m, "popup.battery"), &sub(m, &state));
     let col = if b.charging || b.on_ac {
         GREEN
     } else if b.level < 0.15 {
@@ -1799,6 +1839,17 @@ fn draw_battery(ui: &mut Ui, m: &MetricsData) {
         }
         if d.max_mwh > 0 {
             ui.row(&t("popup.capacity"), &format!("{:.1} / {:.1} {}", d.remaining_mwh as f32 / 1000.0, d.max_mwh as f32 / 1000.0, unit("wh")));
+        }
+        // wear: "112.2 Wh · 99%" (full now against new)
+        if d.design_mwh > 0 {
+            let mut text = format!("{:.1} {}", d.design_mwh as f32 / 1000.0, unit("wh"));
+            if d.max_mwh > 0 {
+                text.push_str(&format!(" · {}", pct(d.max_mwh as f32 / d.design_mwh as f32)));
+            }
+            ui.row(&t("popup.design_capacity"), &text);
+        }
+        if let Some(c) = d.cycles {
+            ui.row(&t("popup.cycles"), &c.to_string());
         }
     }
 }

@@ -201,6 +201,13 @@ time_remaining = "Pozostały czas"
 details = "Szczegóły"
 power = "Moc"
 capacity = "Pojemność"
+design_capacity = "Pojemność fabryczna"
+cycles = "Cykle ładowania"
+os_section = "System operacyjny"
+os_release = "Wersja"
+kernel = "Jądro"
+arch = "Architektura"
+agent = "Agent"
 na = "b/d"
 
 [about]

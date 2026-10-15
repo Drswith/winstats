@@ -201,6 +201,13 @@ time_remaining = "Hátralévő idő"
 details = "Részletek"
 power = "Teljesítmény"
 capacity = "Kapacitás"
+design_capacity = "Tervezett kapacitás"
+cycles = "Töltési ciklusok"
+os_section = "Operációs rendszer"
+os_release = "Verzió"
+kernel = "Kernel"
+arch = "Architektúra"
+agent = "Ügynök"
 na = "n/a"
 
 [about]

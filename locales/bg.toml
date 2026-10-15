@@ -201,6 +201,13 @@ time_remaining = "Оставащо време"
 details = "Подробности"
 power = "Мощност"
 capacity = "Капацитет"
+design_capacity = "Проектен капацитет"
+cycles = "Цикли на зареждане"
+os_section = "Операционна система"
+os_release = "Версия"
+kernel = "Ядро"
+arch = "Архитектура"
+agent = "Агент"
 na = "н/д"
 
 [about]

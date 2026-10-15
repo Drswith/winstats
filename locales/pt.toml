@@ -201,6 +201,13 @@ time_remaining = "Tempo restante"
 details = "Detalhes"
 power = "Potência"
 capacity = "Capacidade"
+design_capacity = "Capacidade de projeto"
+cycles = "Ciclos de carga"
+os_section = "Sistema operativo"
+os_release = "Versão"
+kernel = "Kernel"
+arch = "Arquitetura"
+agent = "Agente"
 na = "n/d"
 
 [about]

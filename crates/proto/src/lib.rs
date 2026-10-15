@@ -55,6 +55,16 @@ pub struct DiskInfo {
     pub bus: String,
     #[serde(default)]
     pub size: u64,
+    #[serde(default)]
+    pub serial: String,
+    #[serde(default)]
+    pub firmware: String,
+    /// Some(true) for solid state, Some(false) for a spinning disk
+    #[serde(default)]
+    pub ssd: Option<bool>,
+    /// discard / TRIM supported
+    #[serde(default)]
+    pub trim: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -69,6 +79,9 @@ pub struct IfaceInfo {
     /// link speed in bits/s, 0 when unknown
     #[serde(default)]
     pub speed: u64,
+    /// the adapter: "Intel Ethernet I225-V", "r8169"; empty when unknown
+    #[serde(default)]
+    pub description: String,
 }
 
 /// What the agent is and what it can report; sent once after `hello`.
@@ -78,9 +91,12 @@ pub struct Info {
     pub id: String,
     pub name: String,
     pub os: String,
-    /// "Ubuntu 22.04", "macOS 15.7", "Windows 11"
+    /// "Ubuntu 24.04.3 LTS", "macOS 15.7 (24G222)", "Windows 11 (build 26100)"
     #[serde(default)]
     pub os_version: String,
+    /// "6.8.0-85-generic", "Darwin 24.6.0", "NT 10.0.26100"
+    #[serde(default)]
+    pub kernel: String,
     pub arch: String,
     pub agent: String,
     #[serde(default)]
@@ -107,6 +123,54 @@ pub struct Info {
     /// modules the agent fills: "cpu", "mem", "net", "disk", "gpu", "battery", "temp"
     #[serde(default)]
     pub has: Vec<String>,
+    /// "NVIDIA Ampere (GA10B)", "Mali-G610 MP4"; empty when unknown
+    #[serde(default)]
+    pub gpu_name: String,
+    /// every GPU the agent found, the reported one (`gpu_name`) among them
+    #[serde(default)]
+    pub gpus: Vec<GpuInfo>,
+    /// notable instruction-set extensions, "AVX2 · AVX · VT-x · EM64T", "RV64GC · Zba · Zbb"
+    #[serde(default)]
+    pub features: String,
+    /// every extension, "MMX, SSE (1, 2, 3, 4.1, 4.2), SSSE3, ..."
+    #[serde(default)]
+    pub all_features: String,
+    /// L1 (data + instruction), L2, L3 over the whole machine, bytes; 0 = unknown
+    #[serde(default)]
+    pub cache: [u64; 3],
+    /// rated and highest clock, MHz
+    #[serde(default)]
+    pub base_mhz: Option<u32>,
+    #[serde(default)]
+    pub max_mhz: Option<u32>,
+    /// hardware virtualization usable (Linux: /dev/kvm, macOS: Hypervisor.framework)
+    #[serde(default)]
+    pub virtualization: Option<bool>,
+    /// this machine itself runs under a hypervisor
+    #[serde(default)]
+    pub hypervisor: bool,
+    /// "LPDDR5 6400 MT/s", "DDR4 2666 MT/s"; empty when unknown
+    #[serde(default)]
+    pub mem_summary: String,
+    /// memory channels in use; 0 = unknown
+    #[serde(default)]
+    pub mem_channels: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct GpuInfo {
+    pub name: String,
+    /// dedicated memory, bytes; 0 for integrated GPUs
+    #[serde(default)]
+    pub vram_total: u64,
+    /// PCI ids; 0 for SoC GPUs
+    #[serde(default)]
+    pub vendor_id: u32,
+    #[serde(default)]
+    pub device_id: u32,
+    /// "nvidia 580.95.05", "amdgpu", "nvgpu (L4T R36.4.3)"
+    #[serde(default)]
+    pub driver: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -149,6 +213,18 @@ pub struct DiskSample {
     /// bytes per second
     pub r: f64,
     pub w: f64,
+    /// busy share 0..1, average queue length, ms per transfer, transfers per second
+    #[serde(default)]
+    pub active: Option<f32>,
+    #[serde(default)]
+    pub queue: Option<f32>,
+    #[serde(default)]
+    pub latency_ms: Option<f32>,
+    #[serde(default)]
+    pub iops: Option<f32>,
+    /// °C
+    #[serde(default)]
+    pub temp: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -159,6 +235,40 @@ pub struct GpuSample {
     pub vram_used: u64,
     #[serde(default)]
     pub vram_total: u64,
+    /// degrees Celsius
+    #[serde(default)]
+    pub temp: Option<f32>,
+    /// hottest point of the die, °C
+    #[serde(default)]
+    pub hotspot: Option<f32>,
+    /// current engine / memory clock and the highest one it runs at, MHz
+    #[serde(default)]
+    pub core_mhz: Option<u32>,
+    #[serde(default)]
+    pub core_max_mhz: Option<u32>,
+    #[serde(default)]
+    pub mem_mhz: Option<u32>,
+    #[serde(default)]
+    pub mem_max_mhz: Option<u32>,
+    /// board power and its limit, W
+    #[serde(default)]
+    pub power_w: Option<f32>,
+    #[serde(default)]
+    pub power_limit_w: Option<f32>,
+    #[serde(default)]
+    pub fan_rpm: Option<u32>,
+    /// fan duty, percent
+    #[serde(default)]
+    pub fan_pct: Option<u32>,
+    /// PCIe link now and at most: generation and lanes (discrete cards)
+    #[serde(default)]
+    pub pcie_gen: Option<u32>,
+    #[serde(default)]
+    pub pcie_width: Option<u32>,
+    #[serde(default)]
+    pub pcie_max_gen: Option<u32>,
+    #[serde(default)]
+    pub pcie_max_width: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -169,6 +279,19 @@ pub struct BatterySample {
     pub on_ac: bool,
     #[serde(default)]
     pub remaining_secs: Option<u32>,
+    /// W; negative while discharging
+    #[serde(default)]
+    pub rate_w: Option<f32>,
+    /// energy left and when full, Wh
+    #[serde(default)]
+    pub remaining_wh: Option<f32>,
+    #[serde(default)]
+    pub full_wh: Option<f32>,
+    /// as new, Wh
+    #[serde(default)]
+    pub design_wh: Option<f32>,
+    #[serde(default)]
+    pub cycles: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -176,6 +299,24 @@ pub struct TempSample {
     pub id: String,
     /// degrees Celsius
     pub c: f32,
+}
+
+/// What a power rail or the whole machine draws: "System" on a Mac, "VDD_IN" on a Jetson.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct PowerSample {
+    pub id: String,
+    /// W
+    pub w: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct FanSample {
+    pub id: String,
+    #[serde(default)]
+    pub rpm: Option<u32>,
+    /// PWM duty, 0..1
+    #[serde(default)]
+    pub duty: Option<f32>,
 }
 
 /// One second of the machine; only rates and fractions, the master keeps the history.
@@ -198,6 +339,10 @@ pub struct Snapshot {
     /// 1, 5, 15 minute load averages where the OS has them
     #[serde(default)]
     pub load: Vec<f32>,
+    #[serde(default)]
+    pub fans: Vec<FanSample>,
+    #[serde(default)]
+    pub power: Vec<PowerSample>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -213,6 +358,12 @@ pub struct ProcSample {
     /// bytes per second read + written
     #[serde(default)]
     pub io: f64,
+    /// busiest GPU engine of the process, 0..1 (`top_gpu` only)
+    #[serde(default)]
+    pub gpu: f32,
+    /// GPU memory the process holds, bytes (`top_gpu` only)
+    #[serde(default)]
+    pub vram: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -231,6 +382,57 @@ pub struct DriveSample {
     pub free: u64,
 }
 
+/// Machine-wide counters for the CPU popup.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SysSample {
+    pub processes: u32,
+    pub threads: u32,
+    /// open handles / file descriptors
+    #[serde(default)]
+    pub handles: u32,
+    #[serde(default)]
+    pub uptime_secs: u64,
+    /// per second
+    #[serde(default)]
+    pub ctx_switches: Option<f64>,
+    #[serde(default)]
+    pub interrupts: Option<f64>,
+    /// CPU time in deferred / interrupt work, 0..1 (DPC and ISR; softirq and irq on Linux)
+    #[serde(default)]
+    pub dpc_time: Option<f32>,
+    #[serde(default)]
+    pub interrupt_time: Option<f32>,
+}
+
+/// Where the memory goes, bytes; 0 = unknown.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct MemDetail {
+    /// private memory of processes
+    #[serde(default)]
+    pub processes: u64,
+    /// kernel memory that can / cannot be paged out or reclaimed
+    #[serde(default)]
+    pub kernel_paged: u64,
+    #[serde(default)]
+    pub kernel_nonpaged: u64,
+    /// file cache
+    #[serde(default)]
+    pub cache: u64,
+    /// committed memory and its limit
+    #[serde(default)]
+    pub commit_used: u64,
+    #[serde(default)]
+    pub commit_limit: u64,
+    /// swap / page file in use and its size
+    #[serde(default)]
+    pub swap_used: u64,
+    #[serde(default)]
+    pub swap_total: u64,
+    /// RAM the firmware or devices keep
+    #[serde(default)]
+    pub hw_reserved: u64,
+}
+
 /// Popup material; requested by the master while a popup is open.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Details {
@@ -243,6 +445,9 @@ pub struct Details {
     pub top_mem: Vec<ProcSample>,
     #[serde(default)]
     pub top_io: Vec<ProcSample>,
+    /// processes on the GPU, busiest first; empty where the agent cannot tell
+    #[serde(default)]
+    pub top_gpu: Vec<ProcSample>,
     #[serde(default)]
     pub drives: Vec<DriveSample>,
     /// IPv4 per interface id
@@ -251,6 +456,13 @@ pub struct Details {
     /// Wi-Fi network per interface id
     #[serde(default)]
     pub ssids: Vec<(String, String)>,
+    #[serde(default)]
+    pub sys: Option<SysSample>,
+    #[serde(default)]
+    pub mem: Option<MemDetail>,
+    /// standard and band per Wi-Fi interface id ("802.11ax, 5 GHz")
+    #[serde(default)]
+    pub wifi: Vec<(String, String)>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

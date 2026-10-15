@@ -201,6 +201,13 @@ time_remaining = "Atlikušais laiks"
 details = "Detaļas"
 power = "Jauda"
 capacity = "Ietilpība"
+design_capacity = "Nominālā ietilpība"
+cycles = "Uzlādes cikli"
+os_section = "Operētājsistēma"
+os_release = "Versija"
+kernel = "Kodols"
+arch = "Arhitektūra"
+agent = "Aģents"
 na = "nav"
 
 [about]

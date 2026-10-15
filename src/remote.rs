@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use winstats_proto::*;
 
 use crate::config::{Config, RemoteCfg};
-use crate::metrics::{self, battery::Battery, disks::PhysicalDisk, drives::Drive, net::NetIface, processes::ProcInfo, MetricsData};
+use crate::metrics::{self, battery::{Battery, BatteryDetail}, gpu::AdapterInfo, disks::PhysicalDisk, drives::Drive, net::NetIface, processes::ProcInfo, Fan, MetricsData, OsInfo, Power};
 
 /// No data for this long: the machine's widgets turn grey.
 pub const STALE_SECS: f64 = 10.0;
@@ -230,6 +230,8 @@ pub struct Agent {
     last_sample: Option<Instant>,
     /// P-cores first, then E-cores (Group P / E cores in the menu)
     group_pe: bool,
+    /// the agent reports the commit charge (Linux); otherwise RAM + swap stands in
+    commit_known: bool,
     /// hardware order of the cores as the agent reports them
     hw_classes: Vec<u8>,
     hw_clusters: Vec<u8>,
@@ -256,6 +258,7 @@ impl Agent {
             disks_disabled: cfg.disks_disabled.clone(),
             last_sample: None,
             group_pe: cfg.group_pe,
+            commit_known: false,
             hw_classes: Vec::new(),
             hw_clusters: Vec::new(),
             hw_smt: Vec::new(),
@@ -267,24 +270,67 @@ impl Agent {
         let d = &mut self.data;
         d.host = info.name.clone();
         d.cpu_name = info.cpu_name.clone();
+        d.sys.cpu.features = info.features.clone();
+        d.sys.cpu.all_features = info.all_features.clone();
+        d.sys.cpu.cache = info.cache;
+        d.sys.cpu.base_mhz = info.base_mhz;
+        d.sys.cpu.max_mhz = info.max_mhz;
+        d.sys.cpu.virtualization = info.virtualization;
+        d.sys.cpu.hypervisor = info.hypervisor;
+        // an agent names its version alone ("0.3.0"), winstats sharing itself "winstats 0.2.9"
+        let agent = if info.agent.starts_with(|c: char| c.is_ascii_digit()) { format!("winstats-agent {}", info.agent) } else { info.agent.clone() };
+        d.os = OsInfo { release: info.os_version.clone(), kernel: info.kernel.clone(), arch: info.arch.clone(), agent };
+        d.mem_summary = (!info.mem_summary.is_empty()).then(|| info.mem_summary.clone());
+        d.mem_channels = (info.mem_channels > 0).then_some(info.mem_channels);
         self.hw_classes = if info.classes.len() == info.cores { info.classes.clone() } else { vec![0; info.cores] };
         // clusters give the dividers in the core chart; the socket count is separate
         self.hw_clusters = if info.clusters.len() == info.cores { info.clusters.clone() } else { vec![0; info.cores] };
         self.hw_smt = if info.smt.len() == info.cores { info.smt.clone() } else { vec![false; info.cores] };
         let d = &mut self.data;
         d.cpu_sockets = info.sockets.max(1);
-        d.cpu_cores = vec![0.0; info.cores];
+        // Info comes again when a disk or interface changes: the live values stay
+        if d.cpu_cores.len() != info.cores {
+            d.cpu_cores = vec![0.0; info.cores];
+        }
         self.rebuild_order();
         let d = &mut self.data;
         d.mem.total = info.mem_total;
         d.mem.commit_total = info.mem_total + info.swap_total;
         d.gpu_available = info.has.iter().any(|h| h == "gpu");
+        d.gpu_name = info.gpu_name.clone();
+        // several GPUs are listed in the popup title, the reported one bright; one is the title
+        d.gpu_adapters = if info.gpus.len() > 1 {
+            info.gpus
+                .iter()
+                .enumerate()
+                .map(|(i, g)| adapter(i, g))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // the reported GPU's ids and driver for "More", also when it is the only one
+        d.gpu_primary = d.gpu_adapters.iter().find(|a| a.name == info.gpu_name).cloned().or_else(|| info.gpus.iter().enumerate().find(|(_, g)| g.name == info.gpu_name).map(|(i, g)| adapter(i, g)));
         d.battery_available = info.has.iter().any(|h| h == "battery");
+        let old_disks = std::mem::take(&mut d.disks);
+        let old_ifaces = std::mem::take(&mut d.net_ifaces);
         d.disks = info
             .disks
             .iter()
             .enumerate()
-            .map(|(i, x)| PhysicalDisk { index: i as u32, model: x.model.clone(), bus: bus_static(&x.bus), size: x.size, read_bps: 0.0, write_bps: 0.0, enabled: !self.disks_disabled.contains(&x.model), ..Default::default() })
+            .map(|(i, x)| PhysicalDisk {
+                index: i as u32,
+                model: x.model.clone(),
+                bus: bus_static(&x.bus),
+                size: x.size,
+                serial: x.serial.clone(),
+                firmware: x.firmware.clone(),
+                ssd: x.ssd,
+                trim: x.trim,
+                read_bps: 0.0,
+                write_bps: 0.0,
+                enabled: !self.disks_disabled.contains(&x.model),
+                ..Default::default()
+            })
             .collect();
         d.net_ifaces = info
             .ifaces
@@ -293,7 +339,7 @@ impl Agent {
                 luid: 0,
                 guid: Default::default(),
                 alias: x.id.clone(),
-                description: String::new(),
+                description: x.description.clone(),
                 mac: x.mac.clone(),
                 speed: x.speed,
                 kind: kind_static(&x.kind),
@@ -306,6 +352,17 @@ impl Agent {
                 enabled: !self.net_disabled.contains(&x.id),
             })
             .collect();
+        for x in &mut d.disks {
+            if let Some(o) = old_disks.iter().find(|o| o.model == x.model) {
+                (x.read_bps, x.write_bps, x.active, x.queue, x.latency_ms, x.iops, x.temp) = (o.read_bps, o.write_bps, o.active, o.queue, o.latency_ms, o.iops, o.temp);
+            }
+        }
+        for i in &mut d.net_ifaces {
+            if let Some(o) = old_ifaces.iter().find(|o| o.alias == i.alias) {
+                (i.rx_bps, i.tx_bps, i.up) = (o.rx_bps, o.tx_bps, o.up);
+                (i.ip, i.ssid, i.wifi) = (o.ip.clone(), o.ssid.clone(), o.wifi.clone());
+            }
+        }
         self.ensure_one_on();
         self.info = Some(info);
     }
@@ -375,7 +432,10 @@ impl Agent {
             d.mem.total = s.mem.used + s.mem.avail;
         }
         d.mem.pct = if d.mem.total > 0 { (d.mem.used as f32 / d.mem.total as f32).clamp(0.0, 1.0) } else { 0.0 };
-        d.mem.commit_used = s.mem.used + s.mem.swap_used;
+        // RAM + swap stands in until the agent reports the real commit charge
+        if !self.commit_known {
+            d.mem.commit_used = s.mem.used + s.mem.swap_used;
+        }
         metrics::push(&mut d.mem_history, d.mem.pct);
         // network
         let (mut rx, mut tx) = (0.0, 0.0);
@@ -401,6 +461,7 @@ impl Agent {
             if let Some(pd) = self.info.as_ref().and_then(|i| i.disks.iter().position(|di| di.id == x.id)).and_then(|p| d.disks.get_mut(p)) {
                 pd.read_bps = x.r;
                 pd.write_bps = x.w;
+                (pd.active, pd.queue, pd.latency_ms, pd.iops, pd.temp) = (x.active, x.queue, x.latency_ms, x.iops, x.temp);
                 if pd.enabled {
                     r += x.r;
                     w += x.w;
@@ -416,19 +477,46 @@ impl Agent {
             d.vram_used = g.vram_used;
             d.vram_total = g.vram_total;
             d.vram_budget = g.vram_total;
+            let p = &mut d.gpu_perf;
+            p.temp = g.temp;
+            p.hotspot = g.hotspot;
+            p.core_mhz = g.core_mhz;
+            p.core_max_mhz = g.core_max_mhz;
+            p.mem_mhz = g.mem_mhz;
+            p.mem_max_mhz = g.mem_max_mhz;
+            p.power_w = g.power_w;
+            p.power_limit_w = g.power_limit_w;
+            p.fan_rpm = g.fan_rpm;
+            p.fan_pct = g.fan_pct;
+            p.power = match (g.power_w, g.power_limit_w) {
+                (Some(w), Some(l)) if l > 0.0 => Some(w / l),
+                _ => None,
+            };
+            (p.pcie_gen, p.pcie_width, p.pcie_max_gen, p.pcie_max_width) = (g.pcie_gen, g.pcie_width, g.pcie_max_gen, g.pcie_max_width);
         }
         metrics::push(&mut d.gpu_history, d.gpu.unwrap_or(0.0));
         d.battery = s.battery.as_ref().map(|b| Battery { level: b.level, charging: b.charging, on_ac: b.on_ac, remaining_secs: b.remaining_secs });
+        let mwh = |wh: Option<f32>| wh.map_or(0, |v| (v * 1000.0).max(0.0) as u32);
+        d.battery_detail = s.battery.as_ref().filter(|b| b.rate_w.is_some() || b.full_wh.is_some() || b.cycles.is_some()).map(|b| BatteryDetail {
+            rate_mw: b.rate_w.map_or(0, |w| (w * 1000.0) as i32),
+            remaining_mwh: mwh(b.remaining_wh),
+            max_mwh: mwh(b.full_wh),
+            design_mwh: mwh(b.design_wh),
+            cycles: b.cycles,
+        });
         d.cpu_temp = pick_cpu_temp(&s.temp);
         d.load_avg = s.load.clone();
+        d.fans = s.fans.iter().map(|f| Fan { id: f.id.clone(), rpm: f.rpm, duty: f.duty }).collect();
+        d.power = s.power.iter().map(|p| Power { id: p.id.clone(), w: p.w }).collect();
     }
 
     fn apply_details(&mut self, det: Details) {
         let d = &mut self.data;
-        let conv = |v: &[ProcSample]| -> Vec<ProcInfo> { v.iter().map(|p| ProcInfo { pid: p.pid, name: p.name.clone(), cpu: p.cpu, mem: p.mem, io: p.io, gpu: 0.0, vram: 0, system: false }).collect() };
+        let conv = |v: &[ProcSample]| -> Vec<ProcInfo> { v.iter().map(|p| ProcInfo { pid: p.pid, name: p.name.clone(), cpu: p.cpu, mem: p.mem, io: p.io, gpu: p.gpu, vram: p.vram, system: false }).collect() };
         d.top_cpu = conv(&det.top_cpu);
         d.top_mem = conv(&det.top_mem);
         d.top_io = conv(&det.top_io);
+        d.top_gpu = conv(&det.top_gpu);
         d.drives = det
             .drives
             .iter()
@@ -446,6 +534,27 @@ impl Agent {
         for (id, ssid) in &det.ssids {
             if let Some(i) = d.net_ifaces.iter_mut().find(|i| i.alias == *id) {
                 i.ssid = ssid.clone();
+            }
+        }
+        for (id, link) in &det.wifi {
+            if let Some(i) = d.net_ifaces.iter_mut().find(|i| i.alias == *id) {
+                i.wifi = link.clone();
+            }
+        }
+        if let Some(s) = &det.sys {
+            let x = &mut d.sys;
+            (x.processes, x.threads, x.handles, x.uptime_secs) = (s.processes, s.threads, s.handles, s.uptime_secs);
+            (x.ctx_switches, x.interrupts, x.dpc_time, x.interrupt_time) = (s.ctx_switches, s.interrupts, s.dpc_time, s.interrupt_time);
+        }
+        if let Some(m) = &det.mem {
+            d.mem_processes = m.processes;
+            d.mem_kernel_paged = m.kernel_paged;
+            d.mem_kernel_nonpaged = m.kernel_nonpaged;
+            d.mem_cache = m.cache;
+            (d.sys.pagefile_used, d.sys.pagefile_total, d.sys.hw_reserved) = (m.swap_used, m.swap_total, m.hw_reserved);
+            if m.commit_limit > 0 {
+                (d.mem.commit_used, d.mem.commit_total) = (m.commit_used, m.commit_limit);
+                self.commit_known = true;
             }
         }
         // busiest interface for the title
@@ -468,16 +577,15 @@ impl Agent {
     }
 }
 
+/// Bus names an agent or another winstats may send (PhysicalDisk keeps a static string).
+const BUSES: [&str; 21] = ["SSD", "HDD", "USB", "NVMe", "SATA", "SD", "MMC", "SCSI", "ATAPI", "ATA", "IEEE 1394", "SSA", "Fibre", "RAID", "iSCSI", "SAS", "Virtual", "FileBackedVirtual", "Spaces", "SCM", "UFS"];
+
 fn bus_static(s: &str) -> &'static str {
-    match s {
-        "SSD" => "SSD",
-        "HDD" => "HDD",
-        "USB" => "USB",
-        "NVMe" => "NVMe",
-        "SATA" => "SATA",
-        "SD" => "SD",
-        _ => "",
-    }
+    BUSES.iter().find(|b| **b == s).copied().unwrap_or("")
+}
+
+fn adapter(i: usize, g: &winstats_proto::GpuInfo) -> AdapterInfo {
+    AdapterInfo { name: g.name.clone(), vendor_id: g.vendor_id, device_id: g.device_id, dedicated: g.vram_total, driver: g.driver.clone(), luid: i as u64 + 1, enabled: true, load: None, perf: Default::default(), dedicated_used: None, shared_used: None }
 }
 
 fn kind_static(s: &str) -> &'static str {

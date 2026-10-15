@@ -560,7 +560,8 @@ impl App {
             }
         }
         let share_details = self.share.as_ref().map_or(false, |s| s.details_wanted());
-        self.metrics.gpu_details = self.popup.visible && self.popup.source.is_none() && self.popup.kind == Some(Kind::Gpu);
+        // a master looking at this machine gets the GPU sensors and per-process use too
+        self.metrics.gpu_details = (self.popup.visible && self.popup.source.is_none() && self.popup.kind == Some(Kind::Gpu)) || share_details;
         let started = std::time::Instant::now();
         self.metrics.update((self.popup.visible && self.popup.source.is_none()) || share_details);
         // latency probe only while the local network popup is open

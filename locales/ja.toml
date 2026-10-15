@@ -201,6 +201,13 @@ time_remaining = "残り時間"
 details = "詳細"
 power = "電力"
 capacity = "容量"
+design_capacity = "設計容量"
+cycles = "充電サイクル"
+os_section = "オペレーティングシステム"
+os_release = "バージョン"
+kernel = "カーネル"
+arch = "アーキテクチャ"
+agent = "エージェント"
 na = "なし"
 
 [about]

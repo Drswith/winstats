@@ -201,6 +201,13 @@ time_remaining = "剩餘時間"
 details = "詳細資料"
 power = "功率"
 capacity = "容量"
+design_capacity = "設計容量"
+cycles = "充電循環"
+os_section = "作業系統"
+os_release = "版本"
+kernel = "核心"
+arch = "架構"
+agent = "代理程式"
 na = "無"
 
 [about]

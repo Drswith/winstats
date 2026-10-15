@@ -201,6 +201,13 @@ time_remaining = "Resterende tid"
 details = "Detaljer"
 power = "Effekt"
 capacity = "Kapacitet"
+design_capacity = "Designkapacitet"
+cycles = "Opladningscyklusser"
+os_section = "Operativsystem"
+os_release = "Version"
+kernel = "Kerne"
+arch = "Arkitektur"
+agent = "Agent"
 na = "–"
 
 [about]

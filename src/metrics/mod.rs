@@ -111,8 +111,38 @@ pub struct MetricsData {
     pub cpu_freq: Vec<u32>,
     /// 1, 5, 15 minute load averages (Unix agents)
     pub load_avg: Vec<f32>,
-    /// popup details of the local machine; empty / None / 0 where unknown (and for agents)
+    /// machine fans an agent reads (Linux hwmon, Mac SMC); empty locally
+    pub fans: Vec<Fan>,
+    /// power rails / whole-machine power an agent reads (Jetson INA3221, Mac SMC); empty locally
+    pub power: Vec<Power>,
+    /// popup details; empty / None / 0 where unknown
     pub sys: SysDetails,
+    /// a remote machine's system ("Ubuntu 24.04.3 LTS"), kernel, architecture and agent;
+    /// empty for the local machine
+    pub os: OsInfo,
+}
+
+#[derive(Default, Clone)]
+pub struct OsInfo {
+    pub release: String,
+    pub kernel: String,
+    pub arch: String,
+    pub agent: String,
+}
+
+#[derive(Default, Clone)]
+pub struct Power {
+    pub id: String,
+    /// W
+    pub w: f32,
+}
+
+#[derive(Default, Clone)]
+pub struct Fan {
+    pub id: String,
+    pub rpm: Option<u32>,
+    /// PWM duty, 0..1
+    pub duty: Option<f32>,
 }
 
 /// Extra popup rows, all local-only and read while a popup is open (the CPU facts once).

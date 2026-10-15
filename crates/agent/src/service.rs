@@ -113,8 +113,12 @@ fn plist_path() -> PathBuf {
 pub fn install(config: &Path) {
     let exe = exe();
     let log = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")).join("Library/Logs/winstats-agent.log");
+    // run from winstats-agent.app: Login Items and the "background item added" notice show the
+    // app's name and icon instead of a bare executable
+    let bundle = if exe.to_string_lossy().contains(".app/Contents/MacOS/") { "  <key>AssociatedBundleIdentifiers</key><string>org.mgvs.winstats-agent</string>\n" } else { "" };
     let plist = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>org.mgvs.winstats-agent</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>{}</string>\n    <string>--config</string>\n    <string>{}</string>\n  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Background</string>\n  <key>StandardErrorPath</key><string>{}</string>\n  <key>StandardOutPath</key><string>{}</string>\n</dict>\n</plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>org.mgvs.winstats-agent</string>\n{}  <key>ProgramArguments</key>\n  <array>\n    <string>{}</string>\n    <string>--config</string>\n    <string>{}</string>\n  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Background</string>\n  <key>StandardErrorPath</key><string>{}</string>\n  <key>StandardOutPath</key><string>{}</string>\n</dict>\n</plist>\n",
+        bundle,
         exe.display(),
         config.display(),
         log.display(),

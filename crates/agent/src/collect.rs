@@ -1,8 +1,9 @@
 //! Metrics through `sysinfo`: one refresh per interval into a `Snapshot`, and heavier
 //! per-process / per-mount material on demand for `Details`.
 
+use crate::linux::Root;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use sysinfo::{Components, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use winstats_proto::*;
 
@@ -11,6 +12,16 @@ pub struct Collector {
     nets: Networks,
     disks: Disks,
     comps: Components,
+    /// thermal zones, added to what `comps` (hwmon) reports
+    zones: Vec<(String, std::path::PathBuf)>,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    gpu: Option<crate::linux::gpu::Gpu>,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fans: crate::linux::hwmon::Fans,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    rails: crate::linux::hwmon::Rails,
+    #[cfg(target_os = "macos")]
+    mac: crate::macos::Mac,
     last: Instant,
     seq: u64,
     /// process table: refreshed only when a master asks for details
@@ -19,9 +30,18 @@ pub struct Collector {
     procs_prev_io: HashMap<u32, (u64, u64, Instant)>,
     #[cfg(windows)]
     wincpu: crate::wincpu::WinCpu,
+    #[cfg(not(windows))]
+    unixcpu: crate::unixcpu::UnixCpu,
     /// last cpu fraction, for the beacon
     last_cpu: f32,
     pub info: Info,
+    root: Root,
+    disk_src: Vec<DiskSrc>,
+    diskstats: crate::linux::block::DiskStats,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    syscnt: crate::linux::sys::SysCounters,
+    wifi: crate::linux::net::Wifi,
+    lists_at: Instant,
 }
 
 /// Interfaces that are not hardware: loopback, containers, VPNs, bridges.
@@ -178,7 +198,8 @@ fn core_freqs(sys: &System, n: usize) -> Vec<u32> {
         }
     }
     let v: Vec<u32> = sys.cpus().iter().map(|c| c.frequency() as u32).collect();
-    if v.len() == n && v.iter().any(|f| *f > 0) {
+    // Apple silicon comes back as a few MHz from sysinfo, which is no reading
+    if v.len() == n && v.iter().any(|f| *f >= 100) {
         v
     } else {
         Vec::new()
@@ -197,6 +218,107 @@ fn os_name() -> String {
     } else {
         std::env::consts::OS.into()
     }
+}
+
+/// Hardware interfaces with their kind, MAC, link speed and adapter.
+fn list_ifaces(nets: &Networks, root: &Root) -> Vec<IfaceInfo> {
+    #[cfg(target_os = "macos")]
+    let kinds = crate::macos::net::kinds();
+    let mut ifaces = Vec::new();
+    for (iname, data) in nets.iter() {
+        if skip_iface(iname) {
+            continue;
+        }
+        let mac = data.mac_address().to_string();
+        // no MAC or no IPv4: bridge members, unplugged ports, virtual leftovers
+        if mac == "00:00:00:00:00:00" || !data.ip_networks().iter().any(|n| n.addr.is_ipv4()) {
+            continue;
+        }
+        #[allow(unused_mut)]
+        let mut kind = if crate::linux::net::is_wifi(root, iname) { "Wi-Fi" } else { iface_kind(iname) };
+        #[allow(unused_mut)]
+        let mut description = crate::linux::net::description(root, iname);
+        #[cfg(target_os = "macos")]
+        if let Some((_, k, d)) = kinds.iter().find(|(n, ..)| n == iname) {
+            kind = k;
+            description = d.clone();
+        }
+        ifaces.push(IfaceInfo { id: iname.clone(), kind: kind.into(), mac, speed: link_speed(iname), description });
+    }
+    ifaces.sort_by(|a, b| a.id.cmp(&b.id));
+    ifaces
+}
+
+/// A listed disk and where its numbers come from: the mounted block device (diskstats) and
+/// the whole disk under it (sysfs).
+#[derive(Clone, PartialEq)]
+struct DiskSrc {
+    id: String,
+    stats: String,
+    whole: String,
+}
+
+/// Mounted storage, one entry per device, with what the hardware tells about it.
+fn list_disks(disks: &Disks, root: &Root, #[allow(unused_variables)] internal: Option<&HwDisk>) -> (Vec<DiskInfo>, Vec<DiskSrc>) {
+    let mut out: Vec<DiskInfo> = Vec::new();
+    let mut src = Vec::new();
+    for d in disks.list() {
+        let fs = d.file_system().to_string_lossy().to_string();
+        let mount = d.mount_point().to_string_lossy().to_string();
+        let dname = disk_id(d, &mount);
+        // a helper mount of nothing (VeraCrypt's FUSE control file system)
+        if skip_mount(&fs, &dname, &mount) || out.iter().any(|x| x.id == dname) || d.total_space() == 0 {
+            continue;
+        }
+        let kind = match d.kind() {
+            sysinfo::DiskKind::SSD => Some(true),
+            sysinfo::DiskKind::HDD => Some(false),
+            _ => None,
+        };
+        let mut info = DiskInfo { id: dname.clone(), model: if dname == mount { mount.clone() } else { format!("{dname} ({mount})") }, bus: if d.is_removable() { "USB".into() } else { String::new() }, size: d.total_space(), ssd: kind, ..Default::default() };
+        if let Some((stats, whole)) = crate::linux::block::resolve(root, &dname, &mount) {
+            let hw = crate::linux::block::hw(root, &whole);
+            apply_hw(&mut info, &mount, &hw.model, hw.bus, &hw.serial, &hw.firmware, hw.ssd);
+            info.trim = hw.trim;
+            src.push(DiskSrc { id: dname.clone(), stats, whole });
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(hw) = internal.filter(|_| mount == "/") {
+            apply_hw(&mut info, &mount, &hw.model, hw.bus, &hw.serial, &hw.firmware, hw.ssd);
+        }
+        if info.bus == "Virtual" {
+            // a virtual disk is neither
+            info.ssd = None;
+        }
+        if info.bus.is_empty() {
+            // what sysinfo knows when sysfs / IOKit said nothing
+            info.bus = match kind {
+                Some(true) => "SSD",
+                Some(false) => "HDD",
+                None => "",
+            }
+            .into();
+        }
+        out.push(info);
+    }
+    (out, src)
+}
+
+#[cfg(target_os = "macos")]
+type HwDisk = crate::macos::disk::Hw;
+#[cfg(not(target_os = "macos"))]
+type HwDisk = ();
+
+fn apply_hw(info: &mut DiskInfo, mount: &str, model: &str, bus: &str, serial: &str, firmware: &str, ssd: Option<bool>) {
+    if !model.is_empty() {
+        info.model = format!("{model} ({mount})");
+    }
+    if !bus.is_empty() && info.bus != "USB" {
+        info.bus = bus.into();
+    }
+    info.serial = serial.into();
+    info.firmware = firmware.into();
+    info.ssd = ssd.or(info.ssd);
 }
 
 impl Collector {
@@ -220,48 +342,64 @@ impl Collector {
                 cpu_name.push_str(b);
             }
         }
+        let root = Root::system();
+        if cpu_name.is_empty() {
+            cpu_name = crate::linux::cpu::name(&root);
+        }
         let name = if name.is_empty() { System::host_name().unwrap_or_else(|| "agent".into()) } else { name.to_string() };
-        let os_version = match (System::name(), System::os_version()) {
-            (Some(n), Some(v)) => format!("{n} {v}"),
-            (Some(n), None) => n,
-            _ => String::new(),
-        };
-        let mut ifaces = Vec::new();
-        for (iname, data) in nets.iter() {
-            if skip_iface(iname) {
-                continue;
-            }
-            let mac = data.mac_address().to_string();
-            // no MAC or no IPv4: bridge members, unplugged ports, virtual leftovers
-            if mac == "00:00:00:00:00:00" || !data.ip_networks().iter().any(|n| n.addr.is_ipv4()) {
-                continue;
-            }
-            ifaces.push(IfaceInfo { id: iname.clone(), kind: iface_kind(iname).into(), mac, speed: link_speed(iname) });
-        }
-        ifaces.sort_by(|a, b| a.id.cmp(&b.id));
-        let mut disk_infos: Vec<DiskInfo> = Vec::new();
-        for d in disks.list() {
-            let fs = d.file_system().to_string_lossy().to_string();
-            let mount = d.mount_point().to_string_lossy().to_string();
-            let dname = disk_id(d, &mount);
-            if skip_mount(&fs, &dname, &mount) || disk_infos.iter().any(|x| x.id == dname) {
-                continue;
-            }
-            let bus = if d.is_removable() { "USB" } else { match d.kind() { sysinfo::DiskKind::SSD => "SSD", sysinfo::DiskKind::HDD => "HDD", _ => "" } };
-            let model = if dname == mount { mount.clone() } else { format!("{dname} ({mount})") };
-            disk_infos.push(DiskInfo { id: dname.clone(), model, bus: bus.into(), size: d.total_space() });
-        }
+        #[cfg(target_os = "macos")]
+        let (os_version, kernel) = crate::macos::sys::os();
+        #[cfg(not(target_os = "macos"))]
+        let (os_version, kernel) = (
+            crate::linux::sys::os_pretty(&root).unwrap_or_else(|| match (System::name(), System::os_version()) {
+                (Some(n), Some(v)) => format!("{n} {v}"),
+                (Some(n), None) => n,
+                _ => String::new(),
+            }),
+            System::kernel_version().map(|k| if cfg!(windows) { format!("NT {k}") } else { k }).unwrap_or_default(),
+        );
+        let zones = crate::linux::thermal::zones(&root);
+        let gpu = crate::linux::gpu::Gpu::find(&root, &zones);
+        let zones = crate::linux::thermal::shown(&root, &zones);
+        let fans = crate::linux::hwmon::Fans::find(&root);
+        let rails = crate::linux::hwmon::Rails::find(&root);
+        let (classes, clusters, sockets, smt) = topology(cores);
+        #[cfg(target_os = "macos")]
+        let mac = crate::macos::Mac::new(&classes);
+        #[cfg(target_os = "macos")]
+        let (gpu_name, gpus, battery, internal) = (mac.gpu_name(), mac.gpus(), mac.has_battery(), mac.disk_hw());
+        #[cfg(not(target_os = "macos"))]
+        let (gpu_name, gpus, battery, internal) = (gpu.as_ref().map(|g| g.name.clone()), gpu.as_ref().map(|g| g.all.clone()).unwrap_or_default(), crate::linux::power::read_battery(&root).is_some(), None::<HwDisk>);
+        let ifaces = list_ifaces(&nets, &root);
+        let (disk_infos, disk_src) = list_disks(&disks, &root, internal.as_ref());
         let mut has = vec!["cpu".to_string(), "mem".into(), "net".into(), "disk".into()];
-        if !comps.list().is_empty() {
+        if gpu_name.is_some() {
+            has.push("gpu".into());
+        }
+        if battery {
+            has.push("battery".into());
+        }
+        if !comps.list().is_empty() || !zones.is_empty() {
             has.push("temp".into());
         }
-        let (classes, clusters, sockets, smt) = topology(cores);
+        let (features, all_features) = crate::features::read();
+        // caches, clocks, virtualization and memory modules: sysfs / SMBIOS on Linux, sysctl and
+        // System Information on a Mac, CPUID where the rest says nothing
+        let (cpuid_base, cpuid_max) = crate::features::x86_clocks();
+        #[cfg(target_os = "macos")]
+        let ((virtualization, mut hypervisor), (mem_summary, mem_channels), cache, (base_mhz, max_mhz)) = (crate::macos::sys::virtualization(), crate::macos::sys::memory(), crate::macos::sys::caches(), (crate::macos::sys::base_mhz(), mac.cpu_max_mhz()));
+        #[cfg(not(target_os = "macos"))]
+        let ((virtualization, mut hypervisor), (mem_summary, mem_channels), cache, (base_mhz, max_mhz)) = (crate::linux::sys::virtualization(&root), crate::linux::dmi::memory(&root), crate::linux::sys::caches(&root), crate::linux::sys::clocks(&root));
+        let base_mhz = base_mhz.or(cpuid_base);
+        let max_mhz = cpuid_max.or(max_mhz).filter(|m| base_mhz.map_or(true, |b| *m >= b));
+        hypervisor |= crate::features::x86_hypervisor();
         let info = Info {
             v: VERSION,
             id: id.to_string(),
             name,
             os: os_name(),
             os_version,
+            kernel,
             arch: System::cpu_arch(),
             agent: agent_version.to_string(),
             cpu_name,
@@ -275,12 +413,29 @@ impl Collector {
             disks: disk_infos,
             ifaces,
             has,
+            gpu_name: gpu_name.unwrap_or_default(),
+            gpus,
+            features,
+            all_features,
+            cache,
+            base_mhz,
+            max_mhz,
+            virtualization,
+            hypervisor,
+            mem_summary,
+            mem_channels,
         };
         Self {
             sys,
             nets,
             disks,
             comps,
+            zones,
+            gpu,
+            fans,
+            rails,
+            #[cfg(target_os = "macos")]
+            mac,
             last: Instant::now(),
             seq: 0,
             procs: None,
@@ -288,13 +443,42 @@ impl Collector {
             procs_prev_io: HashMap::new(),
             #[cfg(windows)]
             wincpu: crate::wincpu::WinCpu::new(cores),
+            #[cfg(not(windows))]
+            unixcpu: crate::unixcpu::UnixCpu::new(cores),
             last_cpu: 0.0,
             info,
+            disk_src,
+            diskstats: Default::default(),
+            syscnt: crate::linux::sys::SysCounters::new(root.clone()),
+            wifi: Default::default(),
+            lists_at: Instant::now(),
+            root,
+        }
+    }
+
+    /// Interfaces and disks come and go (a USB stick, a dongle, a cable): the lists are taken
+    /// again every 30 s and `info` changes when they did.
+    fn refresh_lists(&mut self) {
+        if self.lists_at.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        self.lists_at = Instant::now();
+        #[cfg(target_os = "macos")]
+        let internal = self.mac.disk_hw();
+        #[cfg(not(target_os = "macos"))]
+        let internal: Option<HwDisk> = None;
+        let ifaces = list_ifaces(&self.nets, &self.root);
+        let (disks, src) = list_disks(&self.disks, &self.root, internal.as_ref());
+        if ifaces != self.info.ifaces || disks != self.info.disks {
+            self.info.ifaces = ifaces;
+            self.info.disks = disks;
+            self.disk_src = src;
         }
     }
 
     /// One sample; call once per interval.
     pub fn sample(&mut self) -> Snapshot {
+        self.refresh_lists();
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f64().max(0.05);
         self.last = now;
@@ -306,12 +490,25 @@ impl Collector {
         self.disks.refresh(true);
         self.comps.refresh(true);
 
-        let freq = core_freqs(&self.sys, self.info.cores);
+        #[allow(unused_mut)]
+        let mut freq = core_freqs(&self.sys, self.info.cores);
+        #[cfg(target_os = "macos")]
+        let mac = self.mac.sample();
+        #[cfg(target_os = "macos")]
+        if mac.freq.len() == self.info.cores {
+            freq = mac.freq.clone();
+        }
         #[cfg(not(windows))]
         let cpu = {
-            let cores: Vec<f32> = self.sys.cpus().iter().map(|c| (c.cpu_usage() / 100.0).clamp(0.0, 1.0)).collect();
-            let total = if cores.is_empty() { 0.0 } else { cores.iter().sum::<f32>() / cores.len() as f32 };
-            CpuSample { total, sys: 0.0, user: total, cores, freq }
+            self.unixcpu.update();
+            let u = &self.unixcpu;
+            if u.works() && u.cores.len() == self.info.cores {
+                CpuSample { total: u.total, sys: u.sys, user: u.user, cores: u.cores.clone(), freq }
+            } else {
+                let cores: Vec<f32> = self.sys.cpus().iter().map(|c| (c.cpu_usage() / 100.0).clamp(0.0, 1.0)).collect();
+                let total = if cores.is_empty() { 0.0 } else { cores.iter().sum::<f32>() / cores.len() as f32 };
+                CpuSample { total, sys: 0.0, user: total, cores, freq }
+            }
         };
         #[cfg(windows)]
         let cpu = {
@@ -331,6 +528,7 @@ impl Collector {
         }
         net.sort_by(|a, b| a.id.cmp(&b.id));
 
+        self.diskstats.refresh(&self.root);
         let mut disk = Vec::new();
         for d in self.disks.list() {
             let dname = disk_id(d, &d.mount_point().to_string_lossy());
@@ -338,7 +536,14 @@ impl Collector {
                 continue;
             }
             let u = d.usage();
-            disk.push(DiskSample { id: dname, r: u.read_bytes as f64 / dt, w: u.written_bytes as f64 / dt });
+            let mut s = DiskSample { id: dname, r: u.read_bytes as f64 / dt, w: u.written_bytes as f64 / dt, ..Default::default() };
+            if let Some(src) = self.disk_src.iter().find(|x| x.id == s.id) {
+                if let Some(a) = self.diskstats.activity(&src.stats) {
+                    (s.active, s.queue, s.latency_ms, s.iops) = (Some(a.active), Some(a.queue), a.latency_ms, Some(a.iops));
+                }
+                s.temp = crate::linux::block::temp(&self.root, &src.whole);
+            }
+            disk.push(s);
         }
 
         let mut temp = Vec::new();
@@ -349,11 +554,21 @@ impl Collector {
                 }
             }
         }
+        // thermal zones: all of Jetson's sensors, x86_pkg_temp and acpitz next to hwmon
+        crate::linux::thermal::merge(&mut temp, &self.zones);
 
         let la = System::load_average();
         let load = if la.one > 0.0 || la.five > 0.0 { vec![la.one as f32, la.five as f32, la.fifteen as f32] } else { Vec::new() };
 
-        Snapshot { seq: self.seq, cpu, mem, net, disk, gpu: None, battery: None, temp, load }
+        #[cfg(target_os = "macos")]
+        if let (Some((iops, latency)), Some(d)) = (mac.disk, self.info.disks.iter().find(|d| d.model.ends_with("(/)")).and_then(|i| disk.iter_mut().find(|s| s.id == i.id))) {
+            (d.iops, d.latency_ms) = (Some(iops), latency);
+        }
+        #[cfg(target_os = "macos")]
+        let (gpu, battery, fans, power) = (mac.gpu, mac.battery, mac.fans, mac.power);
+        #[cfg(not(target_os = "macos"))]
+        let (gpu, battery, fans, power) = (self.gpu.as_mut().map(|g| g.sample()), crate::linux::power::read_battery(&self.root), self.fans.sample(), self.rails.sample());
+        Snapshot { seq: self.seq, cpu, mem, net, disk, gpu, battery, temp, load, fans, power }
     }
 
     /// Popup material: top processes and mounted volumes. The process table is refreshed at
@@ -392,6 +607,7 @@ impl Collector {
                     cpu: (p.cpu_usage() / 100.0 / cores).clamp(0.0, 1.0),
                     mem: p.memory(),
                     io,
+                    ..Default::default()
                 });
             }
             self.procs_prev_io = seen;
@@ -402,6 +618,20 @@ impl Collector {
         let mut top_mem = rows.clone();
         top_mem.sort_by(|a, b| b.mem.cmp(&a.mem));
         top_mem.truncate(n);
+        // processes on the GPU (Linux DRM fdinfo and NVML), with their rows for name, CPU and memory
+        #[cfg(not(target_os = "macos"))]
+        let gpu_procs = self.gpu.as_ref().map(|g| g.procs()).unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let gpu_procs: Vec<(u32, f32, u64)> = Vec::new();
+        let mut top_gpu: Vec<ProcSample> = gpu_procs
+            .iter()
+            .map(|(pid, load, vram)| {
+                let base = rows.iter().find(|r| r.pid == *pid).cloned().unwrap_or_else(|| ProcSample { pid: *pid, name: format!("pid {pid}"), ..Default::default() });
+                ProcSample { gpu: *load, vram: *vram, ..base }
+            })
+            .collect();
+        top_gpu.sort_by(|a, b| b.gpu.partial_cmp(&a.gpu).unwrap_or(std::cmp::Ordering::Equal).then(b.vram.cmp(&a.vram)));
+        top_gpu.truncate(n);
         let mut top_io: Vec<ProcSample> = rows.into_iter().filter(|p| p.io > 0.0).collect();
         top_io.sort_by(|a, b| b.io.partial_cmp(&a.io).unwrap_or(std::cmp::Ordering::Equal));
         top_io.truncate(n);
@@ -435,7 +665,40 @@ impl Collector {
             }
         }
 
-        Details { n, top_cpu, top_mem, top_io, drives, ips, ssids: Vec::new() }
+        // Wi-Fi network and link through `iw` (Linux)
+        let (mut ssids, mut wifi) = (Vec::new(), Vec::new());
+        for i in self.info.ifaces.iter().filter(|i| i.kind == "Wi-Fi") {
+            if let Some((ssid, link)) = self.wifi.link(&i.id) {
+                if !ssid.is_empty() {
+                    ssids.push((i.id.clone(), ssid));
+                }
+                if !link.is_empty() {
+                    wifi.push((i.id.clone(), link));
+                }
+            }
+        }
+
+        // processes, threads, open files, uptime, switches and interrupts; where memory goes
+        #[cfg(target_os = "macos")]
+        let mut sys = crate::macos::sys::counters();
+        #[cfg(not(target_os = "macos"))]
+        let mut sys = self.syscnt.sample();
+        if sys.processes == 0 {
+            sys.processes = self.procs.as_ref().map_or(0, |p| p.processes().values().filter(|p| p.thread_kind().is_none()).count() as u32);
+        }
+        sys.uptime_secs = System::uptime();
+        #[cfg(target_os = "macos")]
+        let mem = crate::macos::sys::mem_detail();
+        #[cfg(not(target_os = "macos"))]
+        let mem = crate::linux::sys::mem_detail(&self.root);
+        let mem = mem.map(|mut m| {
+            if m.swap_total == 0 {
+                (m.swap_used, m.swap_total) = (self.sys.used_swap(), self.sys.total_swap());
+            }
+            m
+        });
+
+        Details { n, top_cpu, top_mem, top_io, top_gpu, drives, ips, ssids, sys: Some(sys), mem, wifi }
     }
 
     /// (address, prefix length) of every IPv4 on the listed interfaces, for per-interface beacons.

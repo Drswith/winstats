@@ -201,6 +201,13 @@ time_remaining = "Likęs laikas"
 details = "Išsamiau"
 power = "Galia"
 capacity = "Talpa"
+design_capacity = "Projektinė talpa"
+cycles = "Įkrovimo ciklai"
+os_section = "Operacinė sistema"
+os_release = "Versija"
+kernel = "Branduolys"
+arch = "Architektūra"
+agent = "Agentas"
 na = "nėra"
 
 [about]

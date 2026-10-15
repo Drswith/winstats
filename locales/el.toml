@@ -201,6 +201,13 @@ time_remaining = "Υπολειπόμενος χρόνος"
 details = "Λεπτομέρειες"
 power = "Ισχύς"
 capacity = "Χωρητικότητα"
+design_capacity = "Ονομαστική χωρητικότητα"
+cycles = "Κύκλοι φόρτισης"
+os_section = "Λειτουργικό σύστημα"
+os_release = "Έκδοση"
+kernel = "Πυρήνας"
+arch = "Αρχιτεκτονική"
+agent = "Πράκτορας"
 na = "δ/δ"
 
 [about]

@@ -201,6 +201,13 @@ time_remaining = "Jäänud aeg"
 details = "Üksikasjad"
 power = "Võimsus"
 capacity = "Mahutavus"
+design_capacity = "Nimimahtuvus"
+cycles = "Laadimistsüklid"
+os_section = "Operatsioonisüsteem"
+os_release = "Versioon"
+kernel = "Tuum"
+arch = "Arhitektuur"
+agent = "Agent"
 na = "puudub"
 
 [about]

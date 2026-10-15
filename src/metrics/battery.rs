@@ -32,6 +32,9 @@ pub struct BatteryDetail {
     pub rate_mw: i32,
     pub remaining_mwh: u32,
     pub max_mwh: u32,
+    /// as new; 0 = unknown
+    pub design_mwh: u32,
+    pub cycles: Option<u32>,
 }
 
 pub fn detail() -> Option<BatteryDetail> {
@@ -42,5 +45,5 @@ pub fn detail() -> Option<BatteryDetail> {
     if status.is_err() || !s.BatteryPresent.as_bool() {
         return None;
     }
-    Some(BatteryDetail { rate_mw: s.Rate as i32, remaining_mwh: s.RemainingCapacity, max_mwh: s.MaxCapacity })
+    Some(BatteryDetail { rate_mw: s.Rate as i32, remaining_mwh: s.RemainingCapacity, max_mwh: s.MaxCapacity, ..Default::default() })
 }

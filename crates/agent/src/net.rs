@@ -38,12 +38,16 @@ pub fn beacon_loop(shared: Arc<Shared>) {
                 }
             }
         }
+        let (id, name, os, arch) = {
+            let i = shared.info.lock().unwrap();
+            (i.id.clone(), i.name.clone(), i.os.clone(), i.arch.clone())
+        };
         let b = Beacon {
             v: VERSION,
-            id: shared.info.id.clone(),
-            name: shared.info.name.clone(),
-            os: shared.info.os.clone(),
-            arch: shared.info.arch.clone(),
+            id,
+            name,
+            os,
+            arch,
             port: shared.cfg.port,
             agent: crate::AGENT_VERSION.to_string(),
             cpu,
@@ -123,7 +127,8 @@ fn client(stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
             return Ok(());
         }
     }
-    write_frame(&mut *writer.lock().unwrap(), &Frame::Info(shared.info.clone()))?;
+    let info = shared.info.lock().unwrap().clone();
+    write_frame(&mut *writer.lock().unwrap(), &Frame::Info(info.clone()))?;
 
     // writer: every new sample goes out; stops when the reader has closed the socket
     let alive = Arc::new(Mutex::new(true));
@@ -133,6 +138,7 @@ fn client(stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
         let alive = alive.clone();
         std::thread::spawn(move || {
             let mut last_seq = 0u64;
+            let mut sent = info;
             loop {
                 let snap = {
                     let guard = shared.snap.lock().unwrap();
@@ -146,6 +152,14 @@ fn client(stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
                     continue;
                 }
                 last_seq = snap.seq;
+                // a disk or interface came or went
+                let info = shared.info.lock().unwrap().clone();
+                if info != sent {
+                    if write_frame(&mut *writer.lock().unwrap(), &Frame::Info(info.clone())).is_err() {
+                        break;
+                    }
+                    sent = info;
+                }
                 if write_frame(&mut *writer.lock().unwrap(), &Frame::Snapshot(snap)).is_err() {
                     break;
                 }

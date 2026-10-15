@@ -61,6 +61,7 @@ fn info_from(cfg: &Config, d: &MetricsData) -> Info {
         name: host_name(cfg),
         os: "windows".into(),
         os_version: format!("Windows {} (build {})", if crate::util::is_windows11() { "11" } else { "" }, crate::util::windows_build()).replace("  ", " "),
+        kernel: format!("NT 10.0.{}", crate::util::windows_build()),
         arch: std::env::consts::ARCH.into(),
         agent: format!("winstats {}", crate::about::VERSION),
         cpu_name: d.cpu_name.clone(),
@@ -71,9 +72,24 @@ fn info_from(cfg: &Config, d: &MetricsData) -> Info {
         sockets: d.cpu_sockets.max(1),
         mem_total: d.mem.total,
         swap_total: d.mem.commit_total.saturating_sub(d.mem.total),
-        disks: d.disks.iter().map(|x| DiskInfo { id: format!("PhysicalDrive{}", x.index), model: x.model.clone(), bus: x.bus.to_string(), size: x.size }).collect(),
-        ifaces: d.net_ifaces.iter().map(|i| IfaceInfo { id: i.alias.clone(), kind: i.kind.to_string(), mac: i.mac.clone(), speed: i.speed }).collect(),
+        disks: d
+            .disks
+            .iter()
+            .map(|x| DiskInfo { id: format!("PhysicalDrive{}", x.index), model: x.model.clone(), bus: x.bus.to_string(), size: x.size, serial: x.serial.clone(), firmware: x.firmware.clone(), ssd: x.ssd, trim: x.trim })
+            .collect(),
+        ifaces: d.net_ifaces.iter().map(|i| IfaceInfo { id: i.alias.clone(), kind: i.kind.to_string(), mac: i.mac.clone(), speed: i.speed, description: i.description.clone() }).collect(),
         has,
+        gpu_name: d.gpu_name.clone(),
+        gpus: d.gpu_adapters.iter().filter(|a| a.enabled).map(|a| GpuInfo { name: a.name.clone(), vram_total: a.dedicated, vendor_id: a.vendor_id, device_id: a.device_id, driver: a.driver.clone() }).collect(),
+        features: d.sys.cpu.features.clone(),
+        all_features: d.sys.cpu.all_features.clone(),
+        cache: d.sys.cpu.cache,
+        base_mhz: d.sys.cpu.base_mhz,
+        max_mhz: d.sys.cpu.max_mhz,
+        virtualization: d.sys.cpu.virtualization,
+        hypervisor: d.sys.cpu.hypervisor,
+        mem_summary: d.mem_summary.clone().unwrap_or_default(),
+        mem_channels: d.mem_channels.unwrap_or(0),
     }
 }
 
@@ -83,24 +99,80 @@ fn snapshot_from(d: &MetricsData, seq: u64) -> Snapshot {
         cpu: CpuSample { total: d.cpu_total, sys: d.cpu_system, user: d.cpu_user, cores: d.cpu_cores.clone(), freq: d.cpu_freq.clone() },
         mem: MemSample { used: d.mem.used, avail: d.mem.total.saturating_sub(d.mem.used), swap_used: d.mem.commit_used.saturating_sub(d.mem.used) },
         net: d.net_ifaces.iter().map(|i| NetSample { id: i.alias.clone(), rx: i.rx_bps, tx: i.tx_bps, up: i.up }).collect(),
-        disk: d.disks.iter().map(|x| DiskSample { id: format!("PhysicalDrive{}", x.index), r: x.read_bps, w: x.write_bps }).collect(),
-        gpu: d.gpu.map(|g| GpuSample { load: g, vram_used: d.vram_used, vram_total: d.vram_budget.max(d.vram_total) }),
-        battery: d.battery.map(|b| BatterySample { level: b.level, charging: b.charging, on_ac: b.on_ac, remaining_secs: b.remaining_secs }),
-        temp: Vec::new(),
+        disk: d
+            .disks
+            .iter()
+            .map(|x| DiskSample { id: format!("PhysicalDrive{}", x.index), r: x.read_bps, w: x.write_bps, active: x.active, queue: x.queue, latency_ms: x.latency_ms, iops: x.iops, temp: x.temp })
+            .collect(),
+        gpu: d.gpu.map(|g| GpuSample {
+            load: g,
+            // the adapter's own counter when read; DXGI's figure is winstats' own use
+            vram_used: d.gpu_primary.as_ref().and_then(|p| d.gpu_adapters.iter().find(|a| a.luid == p.luid)).and_then(|a| a.dedicated_used).unwrap_or(d.vram_used),
+            vram_total: d.vram_budget.max(d.vram_total),
+            temp: d.gpu_perf.temp,
+            hotspot: d.gpu_perf.hotspot,
+            core_mhz: d.gpu_perf.core_mhz,
+            core_max_mhz: d.gpu_perf.core_max_mhz,
+            mem_mhz: d.gpu_perf.mem_mhz,
+            mem_max_mhz: d.gpu_perf.mem_max_mhz,
+            power_w: d.gpu_perf.power_w,
+            power_limit_w: d.gpu_perf.power_limit_w,
+            fan_rpm: d.gpu_perf.fan_rpm,
+            fan_pct: d.gpu_perf.fan_pct,
+            pcie_gen: d.gpu_perf.pcie_gen,
+            pcie_width: d.gpu_perf.pcie_width,
+            pcie_max_gen: d.gpu_perf.pcie_max_gen,
+            pcie_max_width: d.gpu_perf.pcie_max_width,
+        }),
+        battery: d.battery.map(|b| {
+            let det = d.battery_detail.unwrap_or_default();
+            let wh = |mwh: u32| (mwh > 0).then(|| mwh as f32 / 1000.0);
+            BatterySample {
+                level: b.level,
+                charging: b.charging,
+                on_ac: b.on_ac,
+                remaining_secs: b.remaining_secs,
+                rate_w: d.battery_detail.map(|x| x.rate_mw as f32 / 1000.0),
+                remaining_wh: wh(det.remaining_mwh),
+                full_wh: wh(det.max_mwh),
+                design_wh: wh(det.design_mwh),
+                cycles: det.cycles,
+            }
+        }),
+        temp: d.cpu_temp.map(|c| vec![TempSample { id: "CPU Package".into(), c }]).unwrap_or_default(),
         load: Vec::new(),
+        fans: Vec::new(),
+        power: Vec::new(),
     }
 }
 
 fn details_from(d: &MetricsData) -> Details {
-    let conv = |v: &[crate::metrics::processes::ProcInfo]| -> Vec<ProcSample> { v.iter().map(|p| ProcSample { pid: p.pid, name: p.name.clone(), cpu: p.cpu, mem: p.mem, io: p.io }).collect() };
+    let conv = |v: &[crate::metrics::processes::ProcInfo]| -> Vec<ProcSample> { v.iter().map(|p| ProcSample { pid: p.pid, name: p.name.clone(), cpu: p.cpu, mem: p.mem, io: p.io, gpu: p.gpu, vram: p.vram }).collect() };
     Details {
         n: d.top_n,
         top_cpu: conv(&d.top_cpu),
         top_mem: conv(&d.top_mem),
         top_io: conv(&d.top_io),
+        top_gpu: conv(&d.top_gpu),
         drives: d.drives.iter().map(|v| DriveSample { id: v.name.clone(), label: v.label.clone(), fs: v.fs.clone(), kind: v.kind.to_string(), readonly: v.readonly, total: v.total, free: v.free }).collect(),
         ips: d.net_ifaces.iter().filter(|i| !i.ip.is_empty()).map(|i| (i.alias.clone(), i.ip.clone())).collect(),
         ssids: d.net_ifaces.iter().filter(|i| !i.ssid.is_empty()).map(|i| (i.alias.clone(), i.ssid.clone())).collect(),
+        sys: (d.sys.processes > 0).then(|| {
+            let x = &d.sys;
+            SysSample { processes: x.processes, threads: x.threads, handles: x.handles, uptime_secs: x.uptime_secs, ctx_switches: x.ctx_switches, interrupts: x.interrupts, dpc_time: x.dpc_time, interrupt_time: x.interrupt_time }
+        }),
+        mem: (d.mem_processes > 0 || d.sys.pagefile_total > 0).then(|| MemDetail {
+            processes: d.mem_processes,
+            kernel_paged: d.mem_kernel_paged,
+            kernel_nonpaged: d.mem_kernel_nonpaged,
+            cache: d.mem_cache,
+            commit_used: d.mem.commit_used,
+            commit_limit: d.mem.commit_total,
+            swap_used: d.sys.pagefile_used,
+            swap_total: d.sys.pagefile_total,
+            hw_reserved: d.sys.hw_reserved,
+        }),
+        wifi: d.net_ifaces.iter().filter(|i| !i.wifi.is_empty()).map(|i| (i.alias.clone(), i.wifi.clone())).collect(),
     }
 }
 
@@ -245,7 +317,8 @@ fn client(stream: TcpStream, inner: Arc<Inner>) -> std::io::Result<()> {
             return Ok(());
         }
     }
-    write_frame(&mut *writer.lock().unwrap(), &Frame::Info(inner.info.lock().unwrap().clone()))?;
+    let info = inner.info.lock().unwrap().clone();
+    write_frame(&mut *writer.lock().unwrap(), &Frame::Info(info.clone()))?;
 
     let alive = Arc::new(AtomicBool::new(true));
     {
@@ -254,6 +327,7 @@ fn client(stream: TcpStream, inner: Arc<Inner>) -> std::io::Result<()> {
         let alive = alive.clone();
         std::thread::spawn(move || {
             let mut last_seq = 0u64;
+            let mut sent = info;
             while alive.load(Ordering::Relaxed) && !inner.stop.load(Ordering::Relaxed) {
                 let snap = {
                     let guard = inner.snap.lock().unwrap();
@@ -264,6 +338,14 @@ fn client(stream: TcpStream, inner: Arc<Inner>) -> std::io::Result<()> {
                     continue;
                 }
                 last_seq = snap.seq;
+                // a disk or adapter came or went since the master connected
+                let info = inner.info.lock().unwrap().clone();
+                if info != sent {
+                    if write_frame(&mut *writer.lock().unwrap(), &Frame::Info(info.clone())).is_err() {
+                        break;
+                    }
+                    sent = info;
+                }
                 if write_frame(&mut *writer.lock().unwrap(), &Frame::Snapshot(snap)).is_err() {
                     break;
                 }

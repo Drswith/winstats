@@ -201,6 +201,13 @@ time_remaining = "Zbývající čas"
 details = "Podrobnosti"
 power = "Výkon"
 capacity = "Kapacita"
+design_capacity = "Návrhová kapacita"
+cycles = "Nabíjecí cykly"
+os_section = "Operační systém"
+os_release = "Verze"
+kernel = "Jádro"
+arch = "Architektura"
+agent = "Agent"
 na = "n/a"
 
 [about]

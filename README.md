@@ -273,11 +273,13 @@ How it fits together:
 1. Run `winstats-agent` on the other machine (see below).
 2. Right click the strip, *Remote machines*, tick *Discover agents on the network*. The machines heard appear in the
    same submenu with their OS, architecture and current load; open one and choose *Connect*.
-3. The machine gets a submenu like a local module: CPU / RAM / Disk / Network with the widget types, a Colour submenu
+3. The machine gets a submenu like a local module: CPU / RAM / Disk / Network, plus GPU and Battery when the agent
+   reports them, with the widget types, a Colour submenu
    per module, Show P / E splitter and Group P / E cores when the machine has two kinds of cores, Labels, Move left /
    right (the whole machine moves as a block), and Forget. It starts with a CPU history and a memory percentage.
 4. Click a remote widget for its popup: the same layout as the local ones, with the machine's name in the title,
-   the CPU temperature and the load average when the agent reports them, and the process list from that machine.
+   the CPU temperature, the load average, the GPU's clock and sensors, the fans and the power draw when the agent
+   reports them, and the process lists from that machine (the GPU one where the agent can tell, see below).
 
 The vertical label next to a remote widget is the machine's `label` (three letters, derived from its name; edit it
 in the config). Toggling interfaces and disks in the popups works the same way and is stored per machine.
@@ -286,9 +288,9 @@ in the config). Toggling interfaces and disks in the popups works the same way a
 
 `winstats-agent` is one binary per platform; `winstats-agent-<version>.zip` in the
 [latest release](https://github.com/mgvs/winstats/releases/latest) holds all of them: `winstats-agent-linux-x86_64`
-and `-linux-aarch64` (static, any distribution), `-macos-x86_64` and `-macos-arm64`, and
-`winstats-agent-windows-x86_64.exe`, `-x86.exe` and `-arm64.exe`; take the one for the machine and run it (the zip
-keeps the Unix ones executable). Every release is built by GitHub Actions (`.github/workflows/release.yml`). Other targets build from
+and `-linux-aarch64` (static, any distribution), `-macos-x86_64` and `-macos-arm64`, `winstats-agent.app` (the same
+for both Macs, as an app), and `winstats-agent-windows-x86_64.exe`, `-x86.exe` and `-arm64.exe`; take the one for the
+machine and run it (the zip keeps the Unix ones executable). Every release is built by GitHub Actions (`.github/workflows/release.yml`). Other targets build from
 source with `cargo build --release -p winstats-agent` (Rust 1.77 or newer). It needs no configuration:
 
 ```
@@ -300,9 +302,47 @@ winstats-agent install-service    # start at boot; uninstall-service removes it
 ```
 
 `install-service` writes a systemd unit on Linux (a system service when run with `sudo`, else a user service plus
-`loginctl enable-linger`), a LaunchAgent on macOS and a Run key on Windows. The config, `agent.toml`, lives in
+`loginctl enable-linger`), a LaunchAgent on macOS and a Run key on Windows.
+
+On a Mac, `winstats-agent.app` is the friendlier choice: put it in `/Applications` and run
+`/Applications/winstats-agent.app/Contents/MacOS/winstats-agent install-service`; *Login Items* and the "background
+item added" notice then show winstats agent with its icon rather than a bare executable. It has no window or Dock
+icon, and opening it from the Finder starts the agent in the background. The app is not notarised, so macOS blocks a
+downloaded copy on first launch: allow it in *System Settings > Privacy & Security > Open Anyway*, or clear the
+download mark with `xattr -dr com.apple.quarantine /Applications/winstats-agent.app`. The config, `agent.toml`, lives in
 `~/.config/winstats-agent/` (`%APPDATA%\winstats-agent\` on Windows) and holds the generated `id`, an optional
 `name`, `port`, `interval_ms`, `token` and `multicast`. Options on the command line override it.
+
+**What the agent reports.** CPU (with the kernel / user split), memory, network and disks everywhere. Beyond that it
+looks in several places, so the same binary covers a desktop, a Jetson and a RISC-V board:
+
+| | Temperatures | GPU (the one with the most video memory) | Fans | Power |
+|---|---|---|---|---|
+| Linux x86 | hwmon (coretemp, k10temp, nvme), thermal zones (`x86_pkg_temp`, `acpitz`) | NVIDIA through NVML (proprietary driver), AMD through amdgpu sysfs, Intel through DRM fdinfo with the clock from i915 / xe | hwmon (Super I/O, laptops); a card's own fan goes to its GPU | the card's, from NVML or hwmon |
+| Linux ARM / RISC-V | hwmon and thermal zones | Jetson and Mali through devfreq (on a Jetson run as root, also the memory clock), Adreno through kgsl, others (panfrost, panthor, v3d, msm, etnaviv) through DRM fdinfo | pwm-fan with its tachometer | INA3221 / INA2xx rails (`VDD_IN`, `VDD_CPU_GPU_CV`, `VDD_SOC` on a Jetson) |
+| macOS | SMC (Intel), the SoC's sensors (Apple silicon) | load and memory as Activity Monitor has them; on Apple silicon the clock and the GPU's power from IOReport, on Intel the temperature from SMC | SMC | the whole Mac from SMC; the CPU on Apple silicon where macOS lets the agent read it |
+
+A Mac and a Linux laptop also report the battery; Apple silicon, the clock of each core cluster. Several GPUs are all listed in
+the popup title, with readings for the one shown. The GPU process list comes from NVML and DRM fdinfo; Jetson, Mali
+on the vendor driver and Macs do not tell which process uses the GPU.
+
+The popups of a remote machine fill the same rows as for this PC where the system has the number:
+
+- **CPU:** processes, threads, open files (as handles), uptime, caches, base / highest clock, instruction sets,
+  virtualization, and a section with the operating system ("Ubuntu 24.04.3 LTS"), kernel, architecture and agent
+  version. Context switches, interrupts and the time in interrupt (irq) and deferred (softirq) work come from Linux
+  only.
+- **Memory:** where it goes (processes, kernel, file cache), swap, the real commit charge (Linux), module type and
+  speed (System Information on a Mac; SMBIOS on Linux, as root).
+- **Disks:** model, bus, serial, firmware, SSD / TRIM, NVMe and `drivetemp` temperatures, activity, latency, IOPS and
+  queue from `/proc/diskstats` (a Mac: IOPS and latency of the internal disk).
+- **GPU:** PCI ids, driver (the L4T release on a Jetson), PCIe link of a card.
+- **Network:** the adapter; on Linux the Wi-Fi network, standard and band through `iw` when it is installed.
+- **Battery:** power, energy, design capacity and charge cycles (Mac, Linux laptops).
+
+Load from DRM fdinfo needs the agent to run as root (`sudo winstats-agent install-service`): a user service does not
+see other users' GPU clients. When an NVIDIA card sleeps as the agent starts (Optimus laptops), NVML is left alone,
+so the agent does not keep the card awake; that card then has no GPU readings.
 
 A Windows machine that runs winstats needs no agent: *Remote machines > Share this machine on the network* makes
 winstats announce and serve itself (`share`, `share_name`, `share_port`, `share_token` in the config).

@@ -1,6 +1,9 @@
 """Generate assets/winstats.ico: a rounded accent-blue square with seven white bars (same as the About logo).
-Pure Python, no dependencies. Two plain 32-bit DIB entries: 16 and 32 px."""
-import math, struct, os, zlib
+Pure Python, no dependencies. Two plain 32-bit DIB entries: 16 and 32 px.
+
+With --iconset DIR it writes the PNGs of a macOS iconset instead (16 to 1024 px, the square on
+Apple's icon grid), for `iconutil -c icns DIR` to turn into the agent app's icon."""
+import math, struct, os, sys, zlib
 
 ACCENT = (0x2E, 0x7C, 0xF6)
 BARS = [0.45, 0.8, 0.35, 0.95, 0.6, 0.25, 0.7]
@@ -81,7 +84,31 @@ def png(size, rows):
     return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b"")
 
 
+def padded(size):
+    """the square at 824/1024 of the canvas, centred, as macOS app icons sit"""
+    inner = max(1, round(size * 824 / 1024))
+    off = (size - inner) // 2
+    body = render(inner)
+    rows = [[(0, 0, 0, 0)] * size for _ in range(size)]
+    for y in range(inner):
+        rows[off + y][off:off + inner] = body[y]
+    return rows
+
+
+def iconset(dir):
+    os.makedirs(dir, exist_ok=True)
+    for base in (16, 32, 128, 256, 512):
+        for scale in (1, 2):
+            sz = base * scale
+            name = f"icon_{base}x{base}{'@2x' if scale == 2 else ''}.png"
+            open(os.path.join(dir, name), "wb").write(png(sz, padded(sz)))
+    print("wrote", dir)
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--iconset":
+        iconset(sys.argv[2])
+        return
     sizes = [16, 32]
     images = []
     for sz in sizes:

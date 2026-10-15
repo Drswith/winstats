@@ -8,8 +8,14 @@
 
 mod collect;
 mod config;
+mod features;
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 mod net;
 mod service;
+#[cfg(not(windows))]
+mod unixcpu;
 #[cfg(windows)]
 mod wincpu;
 
@@ -26,7 +32,8 @@ pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct Shared {
     pub snap: Mutex<Snapshot>,
     pub changed: Condvar,
-    pub info: Info,
+    /// what the collector last listed; clients send it again when it changes
+    pub info: Mutex<Info>,
     pub collector: Mutex<collect::Collector>,
     pub cfg: Config,
 }
@@ -139,7 +146,7 @@ fn main() {
     let info = collector.info.clone();
     eprintln!("winstats-agent {AGENT_VERSION}: {} ({} {}), {} cores, port {}, multicast {}, config {}", info.name, info.os, info.arch, info.cores, cfg.port, if cfg.multicast { "on" } else { "off" }, path.display());
 
-    let shared = Arc::new(Shared { snap: Mutex::new(Snapshot::default()), changed: Condvar::new(), info, collector: Mutex::new(collector), cfg: cfg.clone() });
+    let shared = Arc::new(Shared { snap: Mutex::new(Snapshot::default()), changed: Condvar::new(), info: Mutex::new(info), collector: Mutex::new(collector), cfg: cfg.clone() });
 
     // sampler
     {
@@ -148,7 +155,16 @@ fn main() {
             .name("sampler".into())
             .spawn(move || loop {
                 std::thread::sleep(Duration::from_millis(shared.cfg.interval_ms));
-                let snap = shared.collector.lock().unwrap().sample();
+                let (snap, info) = {
+                    let mut c = shared.collector.lock().unwrap();
+                    (c.sample(), c.info.clone())
+                };
+                {
+                    let mut i = shared.info.lock().unwrap();
+                    if *i != info {
+                        *i = info;
+                    }
+                }
                 *shared.snap.lock().unwrap() = snap;
                 shared.changed.notify_all();
             })

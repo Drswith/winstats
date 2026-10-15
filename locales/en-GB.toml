@@ -202,6 +202,13 @@ time_remaining = "Time remaining"
 details = "Details"
 power = "Power"
 capacity = "Capacity"
+design_capacity = "Design capacity"
+cycles = "Charge cycles"
+os_section = "Operating system"
+os_release = "Release"
+kernel = "Kernel"
+arch = "Architecture"
+agent = "Agent"
 na = "n/a"
 
 [about]

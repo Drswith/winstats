@@ -201,6 +201,13 @@ time_remaining = "Timp rămas"
 details = "Detalii"
 power = "Putere"
 capacity = "Capacitate"
+design_capacity = "Capacitate nominală"
+cycles = "Cicluri de încărcare"
+os_section = "Sistem de operare"
+os_release = "Versiune"
+kernel = "Nucleu"
+arch = "Arhitectură"
+agent = "Agent"
 na = "n/a"
 
 [about]

@@ -201,6 +201,13 @@ time_remaining = "剩余时间"
 details = "详细信息"
 power = "功率"
 capacity = "容量"
+design_capacity = "设计容量"
+cycles = "充电循环"
+os_section = "操作系统"
+os_release = "版本"
+kernel = "内核"
+arch = "架构"
+agent = "代理"
 na = "无"
 
 [about]

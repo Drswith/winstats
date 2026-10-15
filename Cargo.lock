@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "winstats"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -462,8 +462,9 @@ dependencies = [
 
 [[package]]
 name = "winstats-agent"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sysinfo",
@@ -473,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "winstats-proto"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

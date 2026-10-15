@@ -201,6 +201,13 @@ time_remaining = "Kalan süre"
 details = "Ayrıntılar"
 power = "Güç"
 capacity = "Kapasite"
+design_capacity = "Tasarım kapasitesi"
+cycles = "Şarj döngüsü"
+os_section = "İşletim sistemi"
+os_release = "Sürüm"
+kernel = "Çekirdek"
+arch = "Mimari"
+agent = "Ajan"
 na = "yok"
 
 [about]
