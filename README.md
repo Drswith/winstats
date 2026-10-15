@@ -24,7 +24,7 @@ Click a widget for its popup (the Network one shows the tooltip that opens over 
 Right click for the settings menu. The interface comes in 29 languages (see Configuration); the menu in
 English and Ukrainian, the popups in Greek and Ukrainian:
 
-| Settings menu | The same in Ukrainian |
+| Settings menu, the Settings submenu open | In Ukrainian, with the CPU submenu |
 |---|---|
 | ![context menu](docs/menu.png) | ![context menu in Ukrainian](docs/menu-uk.png) |
 
