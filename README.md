@@ -70,7 +70,7 @@ charts stretched, every chart stretched, and the text widgets:
 
 Grab `winstats.exe` (x64), `winstats-x86.exe` (x86) or `winstats-arm64.exe` (ARM64) from the
 [latest release](https://github.com/mgvs/winstats/releases/latest) and run it, or the matching
-`winstats-<version>-win64.zip`, `-win32.zip` or `-arm64.zip` with README and LICENSE. No installer, no runtime, a
+`winstats-<version>-amd64.zip`, `-x86.zip` or `-arm64.zip` with README and LICENSE. No installer, no runtime, a
 single executable. The same page has `winstats-agent-<version>.zip` with the agent for the other machines you want to
 watch (see Remote machines).
 

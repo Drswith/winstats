@@ -135,7 +135,7 @@ jobs:
           version="${tag#v}"
           mkdir release
           cp artifacts/winstats.exe artifacts/winstats-x86.exe artifacts/winstats-arm64.exe release/
-          for pair in win64: win32:-x86 arm64:-arm64; do
+          for pair in amd64: x86:-x86 arm64:-arm64; do
             name="${pair%%:*}"
             suffix="${pair#*:}"
             dir="pack-$name"
