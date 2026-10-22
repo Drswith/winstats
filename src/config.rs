@@ -13,6 +13,10 @@ pub struct Config {
     pub offset: i32,
     /// Widgets in display order.
     pub widgets: Vec<String>,
+    /// Dynamic widget definitions, referenced as "custom:<key>" in widgets.
+    pub custom_widgets: BTreeMap<String, winstats_metrics::WidgetConfig>,
+    /// Out-of-process data sources. "builtin" is reserved for the local collector.
+    pub providers: BTreeMap<String, winstats_metrics::ProviderConfig>,
     /// Refresh interval in milliseconds.
     pub update_ms: u32,
     /// Draw a 3-letter vertical label next to chart widgets.
@@ -104,6 +108,8 @@ impl Default for Config {
                 "battery".into(),
             ],
             update_ms: 1000,
+            custom_widgets: BTreeMap::new(),
+            providers: BTreeMap::new(),
             labels: true,
             utilization_colors: false,
             disk: "C:".into(),
@@ -237,6 +243,18 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_example_and_custom_bindings_round_trip() {
+        let cfg: Config = toml::from_str(include_str!("../examples/providers/config.toml")).unwrap();
+        assert_eq!(cfg.custom_widgets["latency"].metric, "website/homepage/latency");
+        assert_eq!(cfg.custom_widgets["cpu_chart"].view, winstats_metrics::View::Line);
+        assert!(cfg.custom_widgets["latency_chart"].keep_history);
+        let loaded: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(cfg.widgets, loaded.widgets);
+        assert_eq!(cfg.providers, loaded.providers);
+        assert_eq!(cfg.custom_widgets["reachable"].view, loaded.custom_widgets["reachable"].view);
+    }
 
     #[test]
     fn old_configs_default_to_byte_rates() {

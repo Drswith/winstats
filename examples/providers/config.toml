@@ -1,0 +1,33 @@
+# Merge into %APPDATA%\winstats\config.toml. Replace the example directory below.
+# Existing widget names remain supported. Prefix a custom widget alias with "custom:".
+widgets = ["cpu_mini", "custom:cpu_chart", "custom:latency", "custom:latency_chart", "custom:reachable"]
+
+[providers.website]
+enabled = true
+command = "powershell.exe"
+args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File", "http.ps1", "-TargetsFile", "targets.json", "-TimeoutMs", "3000"]
+cwd = 'C:\Users\Administrator\workspaces\winstats\examples\providers'
+interval_ms = 5000
+heartbeat_ms = 15000
+
+[custom_widgets.cpu_chart]
+metric = "builtin/cpu/usage"
+view = "line"
+label = "CPU"
+
+[custom_widgets.latency]
+metric = "website/homepage/latency"
+view = "number"
+label = "WEB"
+color = "teal"
+
+[custom_widgets.latency_chart]
+metric = "website/homepage/latency"
+view = "line"
+label = "WEB"
+keep_history = true
+
+[custom_widgets.reachable]
+metric = "website/homepage/up"
+view = "state"
+label = "WEB"

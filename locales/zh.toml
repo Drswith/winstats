@@ -1,6 +1,7 @@
 # winstats: 简体中文
 
 [module]
+custom = "自定义指标"
 cpu = "处理器"
 gpu = "显卡"
 ram = "内存"
@@ -242,3 +243,18 @@ rpm = "转/分"
 ms = "ms"
 h = "小时"
 min = "分钟"
+
+[extension]
+sources = "数据源"
+status = "状态"
+value = "数值"
+age = "距上次成功"
+error = "错误"
+source = "数据源"
+history = "最近 60 秒"
+waiting = "等待数据"
+ok = "有效"
+stale = "已过期"
+offline = "离线"
+on = "开启"
+off = "关闭"

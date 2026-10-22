@@ -1,6 +1,7 @@
 # winstats: 繁體中文
 
 [module]
+custom = "Custom metrics"
 cpu = "處理器"
 gpu = "顯示卡"
 ram = "記憶體"
@@ -242,3 +243,18 @@ rpm = "轉/分"
 ms = "ms"
 h = "小時"
 min = "分鐘"
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"

@@ -163,7 +163,7 @@ fn parse(text: &str) -> HashMap<String, [u64; 11]> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::fake;
     use super::*;

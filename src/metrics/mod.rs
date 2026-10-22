@@ -1,3 +1,6 @@
+mod local;
+mod builtin;
+pub use local::Metrics;
 pub mod amd;
 pub mod battery;
 pub mod cpu;
@@ -29,6 +32,7 @@ pub const HISTORY: usize = 360;
 /// does not know which.
 #[derive(Default, Clone)]
 pub struct MetricsData {
+    pub generic: winstats_metrics::Registry,
     pub mem: mem::Mem,
     pub cpu_cores: Vec<f32>,
     pub cpu_total: f32,
@@ -217,9 +221,9 @@ impl MetricsData {
     }
 }
 
-/// The local machine: Windows collectors plus the `MetricsData` they fill. Derefs to the data
-/// so drawing code takes `&MetricsData` and callers pass `&Metrics` unchanged.
-pub struct Metrics {
+/// Windows collector handles and the data they fill. Owned by the local worker (or the
+/// non-UI diagnostic command); the window thread owns only `local::Metrics` snapshots.
+pub(crate) struct LocalMetrics {
     pub data: MetricsData,
     cpu: cpu::Cpu,
     net: net::Net,
@@ -250,20 +254,20 @@ pub struct Metrics {
     procs_fresh: bool,
 }
 
-impl Deref for Metrics {
+impl Deref for LocalMetrics {
     type Target = MetricsData;
     fn deref(&self) -> &MetricsData {
         &self.data
     }
 }
 
-impl DerefMut for Metrics {
+impl DerefMut for LocalMetrics {
     fn deref_mut(&mut self) -> &mut MetricsData {
         &mut self.data
     }
 }
 
-impl Metrics {
+impl LocalMetrics {
     pub fn new(disk_letter: &str, top_n: usize, net_disabled: &[String], disks_disabled: &[String]) -> Self {
         let cpu = cpu::Cpu::new();
         let cores = cpu.cores.len();
@@ -379,20 +383,6 @@ impl Metrics {
     pub fn set_proc_filter(&mut self, system: bool, user: bool) {
         self.procs.show_system = system;
         self.procs.show_user = user;
-        self.proc_at = None;
-    }
-
-    /// Rebuild the process lists now (after a filter change), without a new chart sample.
-    pub fn refresh_processes(&mut self) {
-        self.procs.update();
-        self.proc_at = Some(std::time::Instant::now());
-        let d = &mut self.data;
-        d.top_cpu = self.procs.top_cpu.clone();
-        d.top_mem = self.procs.top_mem.clone();
-        d.top_io = self.procs.top_io.clone();
-        // the GPU list follows on the next tick
-        d.top_gpu.clear();
-        self.procs_fresh = false;
         self.proc_at = None;
     }
 

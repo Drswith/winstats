@@ -457,6 +457,7 @@ dependencies = [
  "toml 0.8.19",
  "windows 0.58.0",
  "winresource",
+ "winstats-metrics",
  "winstats-proto",
 ]
 
@@ -470,6 +471,15 @@ dependencies = [
  "sysinfo",
  "toml 0.8.19",
  "winstats-proto",
+]
+
+[[package]]
+name = "winstats-metrics"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows 0.58.0",
 ]
 
 [[package]]

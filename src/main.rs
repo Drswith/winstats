@@ -63,6 +63,8 @@ struct App {
     bar: HWND,
     taskbar: Option<Taskbar>,
     metrics: Metrics,
+    first_run: bool,
+    providers: winstats_metrics::Providers,
     canvas: Canvas,
     widgets: Vec<Box<dyn Widget>>,
     /// (widget index, kind, x0, x1) of each visible widget in bar client coords, for hit-testing
@@ -73,6 +75,8 @@ struct App {
     drag: Option<Drag>,
     /// floating mode: the strip is a top-level window over the taskbar instead of a child
     floating: bool,
+    /// Expose the floating strip as a normal window for native UI acceptance tools.
+    ui_test: bool,
     /// floating mode: remaining burst checks
     zburst: u32,
     popup: Popup,
@@ -216,9 +220,10 @@ fn main() {
     let first_run = !Config::path().exists();
     let mut cfg = Config::load();
     let keys = remote_keys(&cfg);
-    widgets::normalize(&mut cfg.widgets, &keys);
+    widgets::normalize(&mut cfg.widgets, &keys, &cfg.custom_widgets);
     i18n::set_language(&cfg.language);
-    let floating = match cfg.mode.as_str() {
+    let ui_test = args.iter().any(|a| a == "--ui-test");
+    let floating = ui_test || match cfg.mode.as_str() {
         "floating" => true,
         "embedded" => false,
         _ => util::is_windows7(),
@@ -276,26 +281,9 @@ fn main() {
         m
     };
 
-    let mut metrics = Metrics::new(&cfg.disk, cfg.top_processes as usize, &cfg.net_disabled, &cfg.disks_disabled);
-    metrics.set_gpu_disabled(&cfg.gpu_disabled);
-    metrics.proc_interval_ms = cfg.proc_update_ms;
-    metrics.set_proc_filter(cfg.proc_show_system, cfg.proc_show_user);
-    metrics.set_group_pe(cfg.group_pe_cores);
-    if first_run {
-        // do not start with widgets this machine cannot feed
-        let before = cfg.widgets.len();
-        if !metrics.gpu_available {
-            cfg.widgets.retain(|w| widgets::CATALOG.iter().all(|(k, n, _)| *k != Kind::Gpu || *n != w));
-        }
-        if !metrics.battery_available {
-            cfg.widgets.retain(|w| widgets::CATALOG.iter().all(|(k, n, _)| *k != Kind::Battery || *n != w));
-        }
-        if cfg.widgets.len() != before {
-            cfg.save();
-        }
-    }
-    let widgets = widgets::build(&cfg.widgets);
-    let mut popup = Popup::new(hinstance, "WinStatsPopup", backdrop::Opacity::from_config(&cfg.popup_opacity)).expect("popup window");
+    let metrics = Metrics::new(&cfg);
+    let widgets = widgets::build(&cfg.widgets, &cfg.custom_widgets);
+    let mut popup = Popup::new(hinstance, "WinStatsPopup", backdrop::Opacity::from_config(&cfg.popup_opacity), ui_test).expect("popup window");
     popup.proc_filter = (cfg.proc_show_system, cfg.proc_show_user);
     for key in &cfg.popup_more {
         popup.toggle_expand(key.clone());
@@ -308,11 +296,14 @@ fn main() {
             bar: HWND::default(),
             taskbar: None,
             metrics,
+            first_run,
+            providers: winstats_metrics::Providers::default(),
             canvas: Canvas::new(),
             widgets,
             layout: Vec::new(),
             drag: None,
             floating,
+            ui_test,
             zburst: 0,
             popup,
             about,
@@ -410,7 +401,7 @@ impl App {
             let title = wide("winstats bar");
             let bar = unsafe {
                 CreateWindowExW(
-                    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    if self.ui_test { WS_EX_LAYERED } else { WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE },
                     pcwstr(&cls),
                     pcwstr(&title),
                     WS_POPUP,
@@ -512,7 +503,7 @@ impl App {
                 self.cfg.share_id = share::new_id();
                 self.cfg.save();
             }
-            if self.share.is_none() {
+            if self.share.is_none() && self.metrics.ready() {
                 self.share = share::Share::start(&self.cfg, &self.metrics);
             }
         } else {
@@ -536,8 +527,26 @@ impl App {
         }
     }
 
+    fn sync_providers(&mut self) {
+        use std::collections::BTreeMap;
+        use winstats_metrics::Subscription;
+        let mut wanted: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+        for (key, widget) in &self.cfg.custom_widgets {
+            if !widget.keep_history && !self.cfg.widgets.contains(&format!("custom:{key}")) { continue; }
+            let Some((source, metric)) = widget.metric.split_once('/') else { continue };
+            if let Some(cfg) = self.cfg.providers.get(source) {
+                wanted.entry(source.into()).or_default().insert(metric.into(), cfg.interval_ms.clamp(250, 86_400_000));
+            }
+        }
+        let wanted = wanted.into_iter().map(|(id, set)| (id, set.into_iter().map(|(metric, interval_ms)| Subscription { metric, interval_ms }).collect())).collect();
+        let base = config::Config::path().parent().unwrap().to_path_buf();
+        self.providers.reconcile(&self.cfg.providers, &wanted, &base, &mut self.metrics.generic);
+    }
+
     fn tick(&mut self) {
         self.ticks += 1;
+        self.sync_providers();
+        self.providers.poll(&mut self.metrics.generic);
         if !self.ensure_bar() {
             return;
         }
@@ -563,7 +572,23 @@ impl App {
         // a master looking at this machine gets the GPU sensors and per-process use too
         self.metrics.gpu_details = (self.popup.visible && self.popup.source.is_none() && self.popup.kind == Some(Kind::Gpu)) || share_details;
         let started = std::time::Instant::now();
-        self.metrics.update((self.popup.visible && self.popup.source.is_none()) || share_details);
+        let fresh = self.metrics.update((self.popup.visible && self.popup.source.is_none() && self.popup.kind != Some(Kind::Custom)) || share_details);
+        if fresh && self.first_run {
+            self.first_run = false;
+            let before = self.cfg.widgets.len();
+            if !self.metrics.gpu_available {
+                self.cfg.widgets.retain(|w| widgets::CATALOG.iter().all(|(k, n, _)| *k != Kind::Gpu || *n != w));
+            }
+            if !self.metrics.battery_available {
+                self.cfg.widgets.retain(|w| widgets::CATALOG.iter().all(|(k, n, _)| *k != Kind::Battery || *n != w));
+            }
+            if self.cfg.widgets.len() != before {
+                self.cfg.save();
+                self.widgets = widgets::build(&self.cfg.widgets, &self.cfg.custom_widgets);
+            }
+        }
+        if fresh && self.cfg.share && self.share.is_none() { self.apply_share(); }
+
         // latency probe only while the local network popup is open
         let net_open = self.popup.visible && self.popup.source.is_none() && self.popup.kind == Some(Kind::Net);
         self.ping.set(net_open, &self.cfg.ping_host);
@@ -572,8 +597,10 @@ impl App {
         self.metrics.net_ping_host = if self.cfg.ping_host.is_empty() || target.is_empty() { self.cfg.ping_host.clone() } else { target };
         self.metrics.net_latency = lat;
         self.metrics.net_jitter = jit;
-        if let Some(s) = self.share.as_mut() {
-            s.publish(&self.cfg, &self.metrics);
+        if fresh {
+            if let Some(s) = self.share.as_mut() {
+                s.publish(&self.cfg, &self.metrics);
+            }
         }
         if self.remotes.poll(&mut self.cfg) {
             self.cfg.save();
@@ -800,6 +827,7 @@ impl App {
     fn click(&mut self, x: i32, y: i32) {
         let Some((wi, kind, p0, p1, q0, q1)) = self.widget_at(x, y) else { return };
         let source = self.widgets.get(wi).and_then(|w| w.source().map(|s| s.to_string()));
+        let metric = self.widgets.get(wi).and_then(|w| w.metric_id().map(str::to_string));
         let Some(tb) = self.taskbar.as_ref() else { return };
         let mut bar_rc = RECT::default();
         let mut tray_rc = RECT::default();
@@ -812,8 +840,9 @@ impl App {
         } else {
             RECT { left: bar_rc.left + p0, top: bar_rc.top, right: bar_rc.left + p1, bottom: bar_rc.bottom }
         };
-        if self.popup.toggle(kind, source.clone(), wi, anchor, tray_rc) {
+        if self.popup.toggle(kind, source.clone(), metric, wi, anchor, tray_rc) {
             match source {
+                None if kind == Kind::Custom => {},
                 None => {
                     self.metrics.gpu_details = kind == Kind::Gpu;
                     self.metrics.begin_details()
@@ -936,7 +965,7 @@ impl App {
             let insert_at = if to > from { to - 1 } else { to };
             self.cfg.widgets.insert(insert_at.min(self.cfg.widgets.len()), name);
             self.cfg.save();
-            self.widgets = widgets::build(&self.cfg.widgets);
+            self.widgets = widgets::build(&self.cfg.widgets, &self.cfg.custom_widgets);
         }
         self.render();
     }
@@ -968,20 +997,21 @@ impl App {
     }
 
     fn reload(&mut self) {
+        self.popup.hide("config reload");
+        self.first_run = false;
+        self.providers = winstats_metrics::Providers::default();
         self.cfg = Config::load();
         let keys = remote_keys(&self.cfg);
-        widgets::normalize(&mut self.cfg.widgets, &keys);
+        widgets::normalize(&mut self.cfg.widgets, &keys, &self.cfg.custom_widgets);
         let on = self.cfg.discovery;
         self.remotes.set_discovery(on);
         self.share = None;
         i18n::set_language(&self.cfg.language);
-        self.widgets = widgets::build(&self.cfg.widgets);
-        self.metrics = Metrics::new(&self.cfg.disk, self.cfg.top_processes as usize, &self.cfg.net_disabled, &self.cfg.disks_disabled);
-        self.metrics.set_gpu_disabled(&self.cfg.gpu_disabled);
-        self.metrics.proc_interval_ms = self.cfg.proc_update_ms;
-        self.metrics.set_proc_filter(self.cfg.proc_show_system, self.cfg.proc_show_user);
-        self.metrics.set_group_pe(self.cfg.group_pe_cores);
+        self.widgets = widgets::build(&self.cfg.widgets, &self.cfg.custom_widgets);
+        self.metrics.reload(&self.cfg);
+        self.popup.proc_filter = (self.cfg.proc_show_system, self.cfg.proc_show_user);
         self.apply_share();
+        self.sync_providers();
         unsafe {
             SetTimer(self.hidden, TIMER_ID, self.cfg.update_ms.max(250), None);
         }
@@ -1058,7 +1088,7 @@ unsafe extern "system" fn hidden_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, l
         metrics::net::WM_APP_NET => {
             with_app(|app| {
                 app.metrics.refresh_net();
-                log!("net: interfaces changed, {} listed", app.metrics.net_ifaces.len());
+                log!("net: interfaces changed, background refresh requested");
                 if app.popup.visible && app.popup.source.is_none() {
                     app.popup.relayout();
                     app.render_popup(false);
@@ -1303,6 +1333,9 @@ const MENU_LANG_BASE: usize = 600;
 /// Remote submenu: the discovery toggle, then one block of ids per listed agent
 const MENU_REMOTE_DISCOVERY: usize = 700;
 const MENU_REMOTE_SHARE: usize = 701;
+const MENU_CUSTOM_BASE: usize = 800;
+const MENU_PROVIDER_BASE: usize = 1100;
+const MENU_CUSTOM_STRETCH_BASE: usize = 1200;
 const MENU_REMOTE_BASE: usize = 2000;
 const MENU_REMOTE_STRIDE: usize = 200;
 /// items inside an agent's block
@@ -1332,6 +1365,7 @@ fn module_key(k: Kind) -> &'static str {
         Kind::Disk => "disk",
         Kind::Net => "net",
         Kind::Battery => "battery",
+        Kind::Custom => "custom",
     }
 }
 
@@ -1538,6 +1572,25 @@ unsafe fn build_menu(st: &MenuState) -> Option<HMENU> {
             };
             menu_submenu_ex(menu, sub, &title, available);
         }
+        if !cfg.custom_widgets.is_empty() || !cfg.providers.is_empty() {
+            let sub = CreatePopupMenu().ok()?;
+            for (i, (key, widget)) in cfg.custom_widgets.iter().take(128).enumerate() {
+                let name = format!("custom:{key}");
+                let label = if widget.label.is_empty() { key.as_str() } else { &widget.label };
+                menu_item(sub, MENU_CUSTOM_BASE + i, label, cfg.widgets.contains(&name));
+                if vertical && widget.view == winstats_metrics::View::Line && cfg.widgets.contains(&name) {
+                    menu_item(sub, MENU_CUSTOM_STRETCH_BASE + i, &format!("{label}: {}", t("menu.stretch_chart")), cfg.stretched.contains(&name));
+                }
+            }
+            if !cfg.providers.is_empty() {
+                let sources = CreatePopupMenu().ok()?;
+                for (i, (id, provider)) in cfg.providers.iter().take(64).enumerate() {
+                    menu_item(sources, MENU_PROVIDER_BASE + i, id, provider.enabled);
+                }
+                menu_submenu(sub, sources, &t("extension.sources"));
+            }
+            menu_submenu(menu, sub, &t("module.custom"));
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         if let Some(rm) = remote_menu(cfg, remotes, dpi, vertical) {
             let any = !cfg.remotes.is_empty();
@@ -1647,6 +1700,17 @@ fn toggle(list: &mut Vec<String>, item: String) {
     }
 }
 
+/// Use desired settings: snapshot flags may still describe an earlier selection.
+fn toggle_device<'a>(disabled: &mut Vec<String>, item: String, mut devices: impl Iterator<Item = &'a str>) -> bool {
+    if !disabled.contains(&item)
+        && !devices.any(|other| other != item && !disabled.iter().any(|d| d == other))
+    {
+        return false;
+    }
+    toggle(disabled, item);
+    true
+}
+
 fn open_url(url: &str) {
     let verb = wide("open");
     let u = wide(url);
@@ -1711,7 +1775,7 @@ fn menu_state(fresh: bool) -> Option<MenuState> {
         let remotes = if fresh { app.remote_entries() } else { app.menu_remote.clone() };
         app.menu_remote = remotes.clone();
         MenuState {
-            hidden: app.hidden,
+            hidden: if app.ui_test { app.bar } else { app.hidden },
             cfg: app.cfg.clone(),
             hybrid: app.metrics.cpu_hybrid(),
             splittable: app.metrics.cpu_breaks().iter().any(|b| *b),
@@ -1826,8 +1890,6 @@ impl App {
                 self.cfg.save();
                 self.metrics.set_proc_filter(sys, user);
                 self.popup.proc_filter = (sys, user);
-                // rebuild the lists now rather than on the next refresh
-                self.metrics.refresh_processes();
                 self.render_popup(false);
                 return;
             }
@@ -1878,21 +1940,15 @@ impl App {
         // at least one interface / disk must stay on, otherwise the widget shows nothing
         match action {
             popup::Action::ToggleNet(alias) => {
-                let last = self.metrics.net_ifaces.iter().filter(|i| i.enabled).count() <= 1
-                    && self.metrics.net_ifaces.iter().any(|i| i.enabled && i.alias == alias);
-                if last {
+                if !toggle_device(&mut self.cfg.net_disabled, alias, self.metrics.net_ifaces.iter().map(|i| i.alias.as_str())) {
                     return;
                 }
-                toggle(&mut self.cfg.net_disabled, alias);
                 self.metrics.set_net_disabled(&self.cfg.net_disabled);
             }
             popup::Action::ToggleDisk(model) => {
-                let last = self.metrics.disks.iter().filter(|d| d.enabled).count() <= 1
-                    && self.metrics.disks.iter().any(|d| d.enabled && d.model == model);
-                if last {
+                if !toggle_device(&mut self.cfg.disks_disabled, model, self.metrics.disks.iter().map(|d| d.model.as_str())) {
                     return;
                 }
-                toggle(&mut self.cfg.disks_disabled, model);
                 self.metrics.set_disks_disabled(&self.cfg.disks_disabled);
             }
             popup::Action::SelectGpu(name) => {
@@ -1912,18 +1968,14 @@ impl App {
         let Some(rc) = self.cfg.remotes.get_mut(key) else { return };
         match action {
             popup::Action::ToggleNet(alias) => {
-                let last = a.data.net_ifaces.iter().filter(|i| i.enabled).count() <= 1 && a.data.net_ifaces.iter().any(|i| i.enabled && i.alias == alias);
-                if last {
+                if !toggle_device(&mut rc.net_disabled, alias, a.data.net_ifaces.iter().map(|i| i.alias.as_str())) {
                     return;
                 }
-                toggle(&mut rc.net_disabled, alias);
             }
             popup::Action::ToggleDisk(model) => {
-                let last = a.data.disks.iter().filter(|d| d.enabled).count() <= 1 && a.data.disks.iter().any(|d| d.enabled && d.model == model);
-                if last {
+                if !toggle_device(&mut rc.disks_disabled, model, a.data.disks.iter().map(|d| d.model.as_str())) {
                     return;
                 }
-                toggle(&mut rc.disks_disabled, model);
             }
             _ => return,
         }
@@ -2056,9 +2108,9 @@ impl App {
             _ => return,
         }
         let keys = remote_keys(&self.cfg);
-        widgets::normalize(&mut self.cfg.widgets, &keys);
+        widgets::normalize(&mut self.cfg.widgets, &keys, &self.cfg.custom_widgets);
         self.cfg.save();
-        self.widgets = widgets::build(&self.cfg.widgets);
+        self.widgets = widgets::build(&self.cfg.widgets, &self.cfg.custom_widgets);
         if self.remotes.poll(&mut self.cfg) {
             self.cfg.save();
         }
@@ -2068,6 +2120,20 @@ impl App {
     fn apply_menu(&mut self, cmd: usize) {
         let mut interval_changed = false;
         match cmd {
+            c if (MENU_CUSTOM_BASE..MENU_CUSTOM_BASE + self.cfg.custom_widgets.len().min(128)).contains(&c) => {
+                let key = self.cfg.custom_widgets.keys().nth(c - MENU_CUSTOM_BASE).unwrap().clone();
+                toggle(&mut self.cfg.widgets, format!("custom:{key}"));
+                self.popup.hide("widget visibility changed");
+            }
+            c if (MENU_CUSTOM_STRETCH_BASE..MENU_CUSTOM_STRETCH_BASE + self.cfg.custom_widgets.len().min(128)).contains(&c) => {
+                let key = self.cfg.custom_widgets.keys().nth(c - MENU_CUSTOM_STRETCH_BASE).unwrap().clone();
+                toggle(&mut self.cfg.stretched, format!("custom:{key}"));
+            }
+            c if (MENU_PROVIDER_BASE..MENU_PROVIDER_BASE + self.cfg.providers.len().min(64)).contains(&c) => {
+                let key = self.cfg.providers.keys().nth(c - MENU_PROVIDER_BASE).unwrap().clone();
+                let provider = self.cfg.providers.get_mut(&key).unwrap();
+                provider.enabled = !provider.enabled;
+            }
             MENU_LABELS => self.cfg.labels = !self.cfg.labels,
             c if (MENU_STRETCH_BASE..MENU_STRETCH_BASE + widgets::CATALOG.len()).contains(&c) => {
                 toggle(&mut self.cfg.stretched, widgets::CATALOG[c - MENU_STRETCH_BASE].1.to_string());
@@ -2137,6 +2203,7 @@ impl App {
             }
             c if (MENU_INTERVAL_BASE..MENU_INTERVAL_BASE + INTERVALS.len()).contains(&c) => {
                 self.cfg.update_ms = INTERVALS[c - MENU_INTERVAL_BASE].0;
+                self.metrics.set_update_interval(self.cfg.update_ms);
                 interval_changed = true;
             }
             c if (MENU_WIDGET_BASE..MENU_WIDGET_BASE + widgets::CATALOG.len()).contains(&c) => {
@@ -2158,7 +2225,7 @@ impl App {
             _ => return,
         }
         self.cfg.save();
-        self.widgets = widgets::build(&self.cfg.widgets);
+        self.widgets = widgets::build(&self.cfg.widgets, &self.cfg.custom_widgets);
         if interval_changed {
             unsafe {
                 SetTimer(self.hidden, TIMER_ID, self.cfg.update_ms.max(250), None);
@@ -2170,5 +2237,36 @@ impl App {
             }
         }
         self.tick();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toggle_device;
+
+    #[test]
+    fn device_toggles_keep_one_on_before_snapshot_updates() {
+        let devices = ["A", "B"];
+        let mut disabled = Vec::new();
+        assert!(toggle_device(&mut disabled, "A".into(), devices.iter().copied()));
+        assert!(!toggle_device(&mut disabled, "B".into(), devices.iter().copied()));
+        assert_eq!(disabled, ["A"]);
+        assert!(toggle_device(&mut disabled, "A".into(), devices.iter().copied()));
+        assert!(disabled.is_empty());
+        assert!(toggle_device(&mut disabled, "B".into(), devices.iter().copied()));
+        assert!(!toggle_device(&mut disabled, "A".into(), devices.iter().copied()));
+        assert_eq!(disabled, ["B"]);
+    }
+
+    #[test]
+    fn unavailable_or_duplicate_devices_do_not_bypass_last_device_guard() {
+        let mut disabled = Vec::new();
+        assert!(!toggle_device(&mut disabled, "A".into(), ["A", "A"].into_iter()));
+        // A vanished device must not count as another enabled choice.
+        assert!(!toggle_device(&mut disabled, "A".into(), ["A"].into_iter()));
+        // Re-enabling stays possible even if a config had disabled every device.
+        disabled = vec!["A".into(), "B".into()];
+        assert!(toggle_device(&mut disabled, "A".into(), ["A"].into_iter()));
+        assert_eq!(disabled, ["B"]);
     }
 }

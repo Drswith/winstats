@@ -1,6 +1,7 @@
 # winstats: Nederlands
 
 [module]
+custom = "Custom metrics"
 cpu = "Processor"
 gpu = "Grafische kaart"
 ram = "Geheugen"
@@ -242,3 +243,18 @@ rpm = "tpm"
 ms = "ms"
 h = "u"
 min = "min"
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"

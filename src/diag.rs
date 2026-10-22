@@ -2,7 +2,7 @@
 //! and write what each source returned (or that it returned nothing) to a text file, then exit.
 //! For checking a machine without looking at its screen (an old Windows, a remote PC).
 
-use crate::metrics::Metrics;
+use crate::metrics::LocalMetrics as Metrics;
 use std::fmt::Write as _;
 use std::time::Duration;
 

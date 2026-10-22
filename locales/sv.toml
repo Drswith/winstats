@@ -1,6 +1,7 @@
 # winstats: svenska
 
 [module]
+custom = "Custom metrics"
 cpu = "Processor"
 gpu = "Grafikkort"
 ram = "Minne"
@@ -242,3 +243,18 @@ rpm = "varv/min"
 ms = "ms"
 h = "tim"
 min = "min"
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"

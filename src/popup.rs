@@ -124,6 +124,7 @@ pub struct Popup {
     shadow: HWND,
     shadow_canvas: Canvas,
     pub kind: Option<Kind>,
+    metric: Option<String>,
     /// index of the strip widget the popup belongs to: a click on it closes the popup, a click
     /// on another widget of the same module just hands the popup over
     widget: Option<usize>,
@@ -151,20 +152,22 @@ pub struct Popup {
     /// for re-creating the window: DWM does not take a backdrop change on a window that has had one
     hinstance: HINSTANCE,
     class: String,
+    ui_test: bool,
 }
 
 /// The popup window with the background for `opacity`; returns it with the mode in use and the
 /// native mode, which drops to Layered when DWM refuses every backdrop.
-fn create_window(hinstance: HINSTANCE, class: &str, native: crate::backdrop::Mode, opacity: crate::backdrop::Opacity) -> Option<(HWND, crate::backdrop::Mode, crate::backdrop::Mode)> {
+fn create_window(hinstance: HINSTANCE, class: &str, native: crate::backdrop::Mode, opacity: crate::backdrop::Opacity, ui_test: bool) -> Option<(HWND, crate::backdrop::Mode, crate::backdrop::Mode)> {
     use crate::backdrop::{Mode, apply, mode_for};
     let cls = wide(class);
     let title = wide("winstats popup");
     let want = mode_for(native, opacity);
     let layered = if want == Mode::Layered { WS_EX_LAYERED } else { WINDOW_EX_STYLE(0) };
+    let tool = if ui_test { WINDOW_EX_STYLE(0) } else { WS_EX_TOOLWINDOW };
     // DWM gives a backdrop only to framed windows; the frame itself is cut away in WM_NCCALCSIZE
     let style = if want == Mode::Layered { WS_POPUP } else { WS_POPUP | WS_THICKFRAME };
     let hwnd = unsafe {
-        CreateWindowExW(layered | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, pcwstr(&cls), pcwstr(&title), style, 0, 0, 10, 10, None, None, hinstance, None).ok()?
+        CreateWindowExW(layered | tool | WS_EX_TOPMOST, pcwstr(&cls), pcwstr(&title), style, 0, 0, 10, 10, None, None, hinstance, None).ok()?
     };
     if want == Mode::Layered || apply(hwnd, want, false, opacity) {
         return Some((hwnd, want, native));
@@ -176,14 +179,14 @@ fn create_window(hinstance: HINSTANCE, class: &str, native: crate::backdrop::Mod
     crate::log!("popup backdrop {want:?} refused, falling back to a layered window");
     unsafe {
         SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as _);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST).0 as _);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (WS_EX_LAYERED | tool | WS_EX_TOPMOST).0 as _);
     }
     Some((hwnd, Mode::Layered, Mode::Layered))
 }
 
 impl Popup {
-    pub fn new(hinstance: HINSTANCE, class: &str, opacity: crate::backdrop::Opacity) -> Option<Self> {
-        let (hwnd, backdrop, native) = create_window(hinstance, class, crate::backdrop::mode(), opacity)?;
+    pub fn new(hinstance: HINSTANCE, class: &str, opacity: crate::backdrop::Opacity, ui_test: bool) -> Option<Self> {
+        let (hwnd, backdrop, native) = create_window(hinstance, class, crate::backdrop::mode(), opacity, ui_test)?;
         let shadow = unsafe {
             let cls = wide("WinStatsShadow");
             CreateWindowExW(
@@ -208,6 +211,7 @@ impl Popup {
             shadow_canvas: Canvas::new(),
             hinstance,
             class: class.to_string(),
+            ui_test,
             native,
             backdrop,
             applied: None,
@@ -216,6 +220,7 @@ impl Popup {
             content: Canvas::new(),
             icons: Default::default(),
             kind: None,
+            metric: None,
             widget: None,
             source: None,
             hover: None,
@@ -242,11 +247,11 @@ impl Popup {
     }
 
     /// Called from the strip's click handler. `anchor` and `tray` are screen rects.
-    pub fn toggle(&mut self, kind: Kind, source: Option<String>, widget: usize, anchor: RECT, tray: RECT) -> bool {
+    pub fn toggle(&mut self, kind: Kind, source: Option<String>, metric: Option<String>, widget: usize, anchor: RECT, tray: RECT) -> bool {
         let just_hidden = self.hidden_at.map(|t| t.elapsed().as_millis() < 300).unwrap_or(false);
         // "open" also covers the popup the click itself just deactivated (and so hid)
         let open = self.visible || (!self.visible && just_hidden);
-        let same = self.kind == Some(kind) && self.source == source;
+        let same = self.kind == Some(kind) && self.source == source && self.metric == metric;
         if open && same && self.widget == Some(widget) {
             if self.visible {
                 self.hide("toggle");
@@ -264,6 +269,7 @@ impl Popup {
             return true;
         }
         self.kind = Some(kind);
+        self.metric = metric;
         self.widget = Some(widget);
         self.source = source;
         self.anchor = anchor;
@@ -469,7 +475,7 @@ impl Popup {
         if !layered {
             // system material <-> accent policy: only a new window takes the other one
             if crate::backdrop::mode_for(self.native, self.opacity) != self.backdrop {
-                if let Some((hwnd, backdrop, native)) = create_window(self.hinstance, &self.class, self.native, self.opacity) {
+                if let Some((hwnd, backdrop, native)) = create_window(self.hinstance, &self.class, self.native, self.opacity, self.ui_test) {
                     unsafe {
                         let _ = DestroyWindow(self.hwnd);
                     }
@@ -501,6 +507,7 @@ impl Popup {
             Kind::Net => draw_net(&mut ui, m),
             Kind::Disk => draw_disk(&mut ui, m),
             Kind::Battery => draw_battery(&mut ui, m),
+            Kind::Custom => draw_custom(&mut ui, self.metric.as_deref(), m),
         }
         // layout cursor, not painted pixels: reserved (empty) rows count too
         let end_y = ui.y;
@@ -1295,6 +1302,32 @@ fn sub(m: &MetricsData, s: &str) -> String {
     } else {
         format!("{s} · {}", t("popup.offline"))
     }
+}
+
+fn draw_custom(ui: &mut Ui, id: Option<&str>, m: &MetricsData) {
+    let id = id.unwrap_or("");
+    let Some(metric) = m.generic.metrics.get(id) else {
+        ui.title(&t("module.custom"), id);
+        ui.row(&t("extension.status"), &t("extension.waiting"));
+        if let Some((source, _)) = id.split_once('/') {
+            if let Some(reason) = m.generic.sources.get(source) { ui.row(&t("extension.source"), reason); }
+        }
+        return;
+    };
+    ui.title(&metric.descriptor.name, id);
+    ui.row(&t("extension.value"), &metric.text());
+    ui.row(&t("extension.status"), &t(&format!("extension.{}", metric.status(Instant::now()))));
+    let age = metric.last_success.map(|at| format_duration(at.elapsed().as_secs().min(u32::MAX as u64) as u32)).unwrap_or_else(|| "--".into());
+    ui.row(&t("extension.age"), &age);
+    if let Some(error) = &metric.error { ui.row(&t("extension.error"), error); }
+    if let Some((source, _)) = id.split_once('/') {
+        if let Some(status) = m.generic.sources.get(source) { ui.row(&t("extension.source"), status); }
+    }
+    let (low, high) = metric.range();
+    ui.section(&format!("{} ({low:.1}–{high:.1} {})", t("extension.history"), metric.descriptor.unit));
+    let (x, y, w, h) = ui.chart_box(70.0);
+    let points = metric.chart(winstats_metrics::unix_ms(), 60_000, w.max(1) as usize);
+    ui.c.gapped_chart(x, y, w, h, &points, ui.t.accent);
 }
 
 fn draw_cpu(ui: &mut Ui, m: &MetricsData) {

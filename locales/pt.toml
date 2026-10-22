@@ -1,6 +1,7 @@
 # winstats: português
 
 [module]
+custom = "Custom metrics"
 cpu = "Processador"
 gpu = "Placa gráfica"
 ram = "Memória"
@@ -242,3 +243,18 @@ rpm = "rpm"
 ms = "ms"
 h = "h"
 min = "min"
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"

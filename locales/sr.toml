@@ -1,6 +1,7 @@
 # winstats: српски
 
 [module]
+custom = "Custom metrics"
 cpu = "Процесор"
 gpu = "Графичка картица"
 ram = "Меморија"
@@ -242,3 +243,18 @@ rpm = "о/мин"
 ms = "мс"
 h = "ч"
 min = "мин"
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"

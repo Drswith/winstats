@@ -229,6 +229,21 @@ impl Canvas {
         }
     }
 
+    /// Already time-spaced columns; a missing value explicitly breaks the line.
+    pub fn gapped_chart(&mut self, x: i32, y: i32, w: i32, h: i32, values: &[Option<f32>], color: Color) {
+        if w <= 0 || h <= 0 { return; }
+        let mut previous = None;
+        for (i, value) in values.iter().take(w as usize).enumerate() {
+            let Some(value) = value else { previous = None; continue };
+            let top = (y + h - (value.clamp(0.0, 1.0) * h as f32).round() as i32).clamp(y, y + h - 1);
+            let x = x + i as i32;
+            self.fill_rect(x, top, 1, y + h - top, color.alpha(0.25));
+            self.fill_rect(x, top, 1, 1, color);
+            if let Some(prev) = previous { self.fill_rect(x, top.min(prev), 1, (top - prev).abs().max(1), color.alpha(0.7)); }
+            previous = Some(top);
+        }
+    }
+
     /// Pie slice: angles in radians, 0 at 12 o'clock, clockwise; `start <= end`, end - start <= 2π.
     pub fn fill_pie(&mut self, cx: f32, cy: f32, r: f32, start: f32, end: f32, c: Color) {
         let x0 = (cx - r - 1.0).floor() as i32;

@@ -14,6 +14,7 @@ serde = { version = "=1.0.210", features = ["derive"] }
 serde_json = "=1.0.128"
 toml = "=0.8.19"
 winstats-proto = { path = "crates/proto" }
+winstats-metrics = { path = "crates/metrics" }
 
 [dependencies.windows]
 version = "=0.58.0"
@@ -60,7 +61,8 @@ opt-level = 2
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# A collector panic must terminate its thread, not the entire UI process.
+panic = "unwind"
 
 [workspace]
-members = ["crates/proto", "crates/agent"]
+members = ["crates/proto", "crates/agent", "crates/metrics"]

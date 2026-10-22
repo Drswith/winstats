@@ -1,6 +1,7 @@
 # winstats: ελληνικά
 
 [module]
+custom = "Custom metrics"
 cpu = "Επεξεργαστής"
 gpu = "Κάρτα γραφικών"
 ram = "Μνήμη"
@@ -242,3 +243,18 @@ rpm = "στρ./λεπτό"
 ms = "ms"
 h = "ώ"
 min = "λεπ."
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"

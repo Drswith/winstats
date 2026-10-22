@@ -93,6 +93,11 @@ The Windows binaries are built with Rust 1.77, the last toolchain that still run
 
 ## Build and run
 
+On Windows, install [Rust through rustup](https://rustup.rs/) and
+[Visual Studio 2022 Build Tools](https://aka.ms/vs/17/release/vs_BuildTools.exe). In Build Tools, select
+*Desktop development with C++*, including the MSVC v143 x64/x86 build tools and a Windows SDK.
+ARM64 cross builds also need the MSVC v143 ARM64 build tools. Open a new PowerShell window after installation.
+
 ```
 cargo build --release                                              # x64
 cargo build --release --target i686-pc-windows-msvc                # x86
@@ -104,6 +109,19 @@ target\aarch64-pc-windows-msvc\release\winstats.exe                # ARM64
 ```
 
 `rust-toolchain.toml` pins Rust 1.77 and all three targets; rustup fetches them on the first build.
+If your shell sets `RUSTUP_TOOLCHAIN`, it overrides that file; use `cargo +1.77.0` explicitly in the commands
+above to build with the project's pinned compiler.
+
+To build both the taskbar application and the Windows agent, then run the workspace tests:
+
+```powershell
+cargo +1.77.0 build --release --workspace --locked
+cargo +1.77.0 test --workspace --locked
+```
+
+The x64 executables are `target\release\winstats.exe` and `target\release\winstats-agent.exe`.
+For a quick local agent check without starting its network server, run
+`target\release\winstats-agent.exe --dump`.
 
 The log goes to `%APPDATA%\winstats\winstats.log`.
 
@@ -160,6 +178,14 @@ Modules the machine cannot feed are greyed out in the menu and left out of the w
 the PDH "GPU Engine" counters do not exist, Battery on machines without one.
 
 ## Configuration
+
+Custom numeric, history and state widgets can also be supplied by external processes without
+rebuilding winstats. See [Custom metrics and providers](docs/providers.md) for configuration,
+the asynchronous HTTP example and the versioned JSON pipe protocol. Custom metrics currently
+work on the local machine; remote-agent forwarding is not implemented yet.
+Built-in CPU, memory, network, disk, GPU and battery collection runs on a background worker.
+Its nine `builtin/` bindings share snapshots with the existing widgets; see the linked catalog
+for metric names, units and freshness behaviour.
 
 `%APPDATA%\winstats\config.toml` is created on first start:
 
@@ -232,7 +258,7 @@ Data sources:
 | `cpu_line` | total CPU load history | same |
 | `mem` | used memory in % | `GlobalMemoryStatusEx` |
 | `gpu` | GPU load as in Task Manager | PDH `\GPU Engine(*)\Utilization Percentage` |
-| `net` | receive/transmit rate over physical adapters | `GetIfTable2` |
+| `net` | transmit rate on top, receive rate below, over physical adapters | `GetIfTable2` |
 | `disk` | read/write over all physical disks | PDH `\PhysicalDisk(_Total)` |
 | `battery` | charge and state; hidden without a battery | `GetSystemPowerStatus` |
 

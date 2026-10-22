@@ -162,6 +162,7 @@ pub enum Kind {
     Disk,
     Net,
     Battery,
+    Custom,
 }
 
 impl Kind {
@@ -174,6 +175,7 @@ impl Kind {
             Kind::Disk => "module.disk",
             Kind::Net => "module.network",
             Kind::Battery => "module.battery",
+            Kind::Custom => "module.custom",
         })
     }
 }
@@ -259,8 +261,9 @@ pub fn is_known(name: &str) -> bool {
 
 /// Drop unknown names (and remote widgets of machines that are no longer configured) so
 /// config indices line up with the built widget list.
-pub fn normalize(list: &mut Vec<String>, remotes: &[String]) {
+pub fn normalize(list: &mut Vec<String>, remotes: &[String], custom: &std::collections::BTreeMap<String, winstats_metrics::WidgetConfig>) {
     list.retain(|n| {
+        if let Some(key) = n.strip_prefix("custom:") { return custom.contains_key(key); }
         let (src, _) = split_name(n);
         let ok = is_known(n) && (src.is_empty() || remotes.iter().any(|r| r == src));
         if !ok {
@@ -325,6 +328,7 @@ pub trait Widget {
     fn kind(&self) -> Kind;
     fn width(&self, c: &mut Canvas, t: &Theme, m: &MetricsData) -> i32;
     fn draw(&self, c: &mut Canvas, x: i32, y: i32, t: &Theme, m: &MetricsData);
+    fn metric_id(&self) -> Option<&str> { None }
     /// remote machine key this widget shows; None for the local machine
     fn source(&self) -> Option<&str> {
         None
@@ -352,13 +356,17 @@ impl Widget for Remote {
     }
 }
 
-pub fn build(names: &[String]) -> Vec<Box<dyn Widget>> {
+pub fn build(names: &[String], custom: &std::collections::BTreeMap<String, winstats_metrics::WidgetConfig>) -> Vec<Box<dyn Widget>> {
     let mut out: Vec<Box<dyn Widget>> = Vec::new();
     for n in names {
+        if let Some(def) = n.strip_prefix("custom:").and_then(|key| custom.get(key)) {
+            out.push(Box::new(Generic(def.clone())));
+            continue;
+        }
         let (src, base) = split_name(n);
         if !src.is_empty() {
             // "pi4/cpu_line": build the plain widget, wrap it with its machine
-            if let Some(w) = build(&[base.to_string()]).pop() {
+            if let Some(w) = build(&[base.to_string()], custom).pop() {
                 out.push(Box::new(Remote { key: src.to_string(), inner: w }));
             }
             continue;
@@ -384,6 +392,51 @@ pub fn build(names: &[String]) -> Vec<Box<dyn Widget>> {
 }
 
 // ---------------------------------------------------------------- label column
+
+/// Data binding is independent of the renderer; unknown/unavailable metrics keep their slot.
+pub struct Generic(pub winstats_metrics::WidgetConfig);
+
+impl Widget for Generic {
+    fn kind(&self) -> Kind { Kind::Custom }
+    fn metric_id(&self) -> Option<&str> { Some(&self.0.metric) }
+    fn width(&self, c: &mut Canvas, t: &Theme, m: &MetricsData) -> i32 {
+        if self.0.view == winstats_metrics::View::Line { return label_width(t) + t.s(t.chart_w); }
+        let metric = m.generic.metrics.get(&self.0.metric);
+        let label = if self.0.label.is_empty() { metric.map(|m| m.descriptor.name.as_str()).unwrap_or(&self.0.metric) } else { &self.0.label };
+        let text = metric.map(|m| m.text()).unwrap_or_else(|| "--".into());
+        c.measure_text(&label.chars().take(20).collect::<String>(), t.font(7.0, FW_NORMAL)).0
+            .max(c.measure_text(&format!("{text} !"), t.font(10.0, FW_SEMIBOLD)).0).max(t.s(32.0))
+    }
+    fn draw(&self, c: &mut Canvas, x: i32, y: i32, t: &Theme, m: &MetricsData) {
+        let metric = m.generic.metrics.get(&self.0.metric);
+        let label = if self.0.label.is_empty() { metric.map(|m| m.descriptor.name.as_str()).unwrap_or(&self.0.metric) } else { &self.0.label };
+        let label: String = label.chars().take(20).collect();
+        let status = metric.map(|m| m.status(std::time::Instant::now())).unwrap_or("waiting");
+        let color = named_color(&self.0.color).unwrap_or(t.accent);
+        let color = if status == "ok" { color } else { t.dim };
+        let w = self.width(c, t, m);
+        if self.0.view == winstats_metrics::View::Line {
+            draw_label(c, x, y, t, &label);
+            let x = x + label_width(t); let w = w - label_width(t);
+            c.stroke_round_rect(x, y, w, t.inner_h, t.dim.alpha(0.7));
+            if let Some(metric) = metric {
+                let values = metric.chart(winstats_metrics::unix_ms(), 60_000, (w - 2).max(1) as usize);
+                c.gapped_chart(x + 1, y + 1, w - 2, t.inner_h - 2, &values, color);
+            }
+            if status != "ok" { c.draw_text("!", x + 2, y, t.font(8.0, FW_SEMIBOLD), YELLOW); }
+        } else {
+            let lf = t.font(7.0, FW_NORMAL); let vf = t.font(10.0, FW_SEMIBOLD);
+            let text = if self.0.view == winstats_metrics::View::State {
+                metric.and_then(|m| m.value.as_ref()).map(|v| crate::i18n::t(if v.number() != 0.0 { "extension.on" } else { "extension.off" })).unwrap_or_else(|| "--".into())
+            } else { metric.map(|m| m.text()).unwrap_or_else(|| "--".into()) };
+            let text = if status == "ok" { text } else { format!("{text} !") };
+            let (lw, lh) = c.measure_text(&label, lf); let (vw, vh) = c.measure_text(&text, vf);
+            let top = y + (t.inner_h - lh - vh + t.s(2.0)) / 2;
+            c.draw_text(&label, x + (w - lw) / 2, top, lf, t.dim);
+            c.draw_text(&text, x + (w - vw) / 2, top + lh - t.s(2.0), vf, color);
+        }
+    }
+}
 
 const LABEL_DIP: f32 = 6.0;
 
@@ -416,6 +469,7 @@ fn short_label(k: Kind) -> &'static str {
         Kind::Disk => "DSK",
         Kind::Net => "NET",
         Kind::Battery => "BAT",
+        Kind::Custom => "EXT",
     }
 }
 
@@ -592,7 +646,7 @@ fn pair_now(k: Kind, m: &MetricsData, t: &Theme) -> [(f64, Color); 2] {
     let (a, b) = pair_colors(k, t);
     match k {
         Kind::Disk => [(m.disk_read, a), (m.disk_write, b)],
-        _ => [(m.net_rx, a), (m.net_tx, b)],
+        _ => [(m.net_tx, b), (m.net_rx, a)],
     }
 }
 

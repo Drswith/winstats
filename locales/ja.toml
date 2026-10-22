@@ -1,6 +1,7 @@
 # winstats: 日本語
 
 [module]
+custom = "Custom metrics"
 cpu = "CPU"
 gpu = "GPU"
 ram = "メモリ"
@@ -242,3 +243,18 @@ rpm = "RPM"
 ms = "ms"
 h = "時間"
 min = "分"
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"

@@ -1,6 +1,7 @@
 # winstats: Türkçe
 
 [module]
+custom = "Custom metrics"
 cpu = "İşlemci"
 gpu = "Ekran kartı"
 ram = "Bellek"
@@ -242,3 +243,18 @@ rpm = "dev/dk"
 ms = "ms"
 h = "sa"
 min = "dk"
+
+[extension]
+sources = "Data sources"
+status = "Status"
+value = "Value"
+age = "Last success ago"
+error = "Error"
+source = "Source"
+history = "Last 60 seconds"
+waiting = "Waiting for data"
+ok = "Current"
+stale = "Expired"
+offline = "Offline"
+on = "On"
+off = "Off"
